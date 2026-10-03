@@ -392,7 +392,7 @@ function nmcRenderNodes(nodes, hass, vars, errs, ctx) {
     }
   };
   if (ctx.depth >= NMC_MAX_TEMPLATE_DEPTH) {
-    warn(`template → profondeur maximale (${NMC_MAX_TEMPLATE_DEPTH})`);
+    warn(`${_t('template → profondeur maximale')} (${NMC_MAX_TEMPLATE_DEPTH})`);
     return "";
   }
   ctx.depth++;
@@ -407,14 +407,14 @@ function nmcRenderNodes(nodes, hass, vars, errs, ctx) {
     const room = NMC_MAX_TEMPLATE_OUTPUT - ctx.chars;
     if (room <= 0) {
       ctx.truncated = true;
-      warn(`template → sortie limitée à ${NMC_MAX_TEMPLATE_OUTPUT} caractères`);
+      warn(`${_t('template → sortie limitée à')} ${NMC_MAX_TEMPLATE_OUTPUT} ${_t('caractères')}`);
       return;
     }
     if (text.length > room) {
       out += text.slice(0, room);
       ctx.chars += room;
       ctx.truncated = true;
-      warn(`template → sortie limitée à ${NMC_MAX_TEMPLATE_OUTPUT} caractères`);
+      warn(`${_t('template → sortie limitée à')} ${NMC_MAX_TEMPLATE_OUTPUT} ${_t('caractères')}`);
       return;
     }
     out += text;
@@ -439,7 +439,7 @@ function nmcRenderNodes(nodes, hass, vars, errs, ctx) {
       if (n.t === "macro") {
         // definition seule : on stocke, on n'emet RIEN (sinon le corps sort inline)
         if (NMC_MACRO_RESERVED.has(n.name) || nmcMathFns[n.name]) {
-          warn(`macro ${n.name} → nom reserve, definition ignoree`);
+          warn(`macro ${n.name} → ${_t('nom reserve, definition ignoree')}`);
         } else {
           nmcMacroScope(vars)[NMC_MACRO_PREFIX + n.name] = { params: n.params, body: n.body };
         }
@@ -471,7 +471,7 @@ function nmcRenderNodes(nodes, hass, vars, errs, ctx) {
           continue;
         }
         if (!Array.isArray(list)) {
-          if (errs) errs.push(`for ${n.name} in ${String(n.s).slice(0, 70)} → pas une liste (${typeof list})`);
+          if (errs) errs.push(`for ${n.name} in ${String(n.s).slice(0, 70)} → ${_t('pas une liste')} (${typeof list})`);
           continue;
         }
         if (list.length === 0 && n.elseBody && n.elseBody.length) {
@@ -480,7 +480,7 @@ function nmcRenderNodes(nodes, hass, vars, errs, ctx) {
         }
         const len = Math.min(list.length, NMC_MAX_TEMPLATE_ITERATIONS - ctx.iterations);
         if (len < list.length)
-          warn(`for ${n.name} → itérations limitées à ${NMC_MAX_TEMPLATE_ITERATIONS}`);
+          warn(`for ${n.name} → ${_t('itérations limitées à')} ${NMC_MAX_TEMPLATE_ITERATIONS}`);
         for (let i = 0; i < len && !ctx.truncated; i++) {
           ctx.iterations++;
           const child = Object.create(vars);
@@ -2134,6 +2134,95 @@ function nmcRnd(min, max, dec = 2) {
 /* ══════════════════════════════════════════════════════════════════
  *  ÉDITEUR
  * ════════════════════════════════════════════════════════════════ */
+/* ── i18n FR/EN : la clé est la chaîne française (le français s'affiche tel quel) ── */
+let _lang = 'en';
+const _EN = {
+ "Action au tap": "Tap action",
+ "Alignement H": "Horizontal align",
+ "Alignement V": "Vertical align",
+ "Aucun": "None",
+ "Aucune": "None",
+ "Bas": "Bottom",
+ "Bordure": "Border",
+ "Centre": "Centre",
+ "Chemin navigation": "Navigation path",
+ "Commun": "Shared",
+ "Contenu": "Content",
+ "Corps": "Body",
+ "Corps seul": "Body only",
+ "Couleur bordure": "Border colour",
+ "Couleur fond": "Background colour",
+ "Couleur glow": "Glow colour",
+ "Couleur icône": "Icon colour",
+ "Couleur texte": "Text colour",
+ "Couleurs": "Colours",
+ "Dessus": "Top",
+ "Droite": "Right",
+ "Effets": "Effects",
+ "Entité (more-info)": "Entity (more-info)",
+ "Espacement": "Spacing",
+ "Flicker": "Flicker",
+ "Flou fond": "Background blur",
+ "Fond": "Background",
+ "Format": "Format",
+ "Gauche": "Left",
+ "Glow": "Glow",
+ "Gradient": "Gradient",
+ "Gradient début": "Gradient start",
+ "Gradient fin": "Gradient end",
+ "HTML / Jinja": "HTML / Jinja",
+ "HTML : blocs néon (div/span/svg/gradients). Markdown : **gras** [lien](url) # titre - liste. Les deux acceptent {% for %}, {% if %}, {{ states() }}, filtres |sort/map/join/format/clamp… + &lt;style&gt; scopé, data-entity → more-info": "HTML: neon blocks (div/span/svg/gradients). Markdown: **bold** [link](url) # heading - list. Both accept {% for %}, {% if %}, {{ states() }}, filters |sort/map/join/format/clamp… + scoped &lt;style&gt;, data-entity → more-info",
+ "Haut": "Top",
+ "Hover Glitch": "Hover glitch",
+ "Icône": "Icon",
+ "Interaction": "Interaction",
+ "Italique": "Italic",
+ "Majuscules": "Uppercase",
+ "Markdown": "Markdown",
+ "Mise en page": "Layout",
+ "Mode d'affichage": "Display mode",
+ "Mon Dashboard — templates {{ states(\"entity\") }} supportés": "My Dashboard — {{ states(\"entity\") }} templates supported",
+ "Navigation": "Navigation",
+ "Opacité fond (0–1)": "Background opacity (0–1)",
+ "Plus d’info": "More info",
+ "Points": "Dotted",
+ "Police": "Font",
+ "Police globale": "Global font",
+ "Position icône": "Icon position",
+ "Radius": "Radius",
+ "Scanline CRT": "CRT scanline",
+ "Solide": "Solid",
+ "Style": "Style",
+ "Taille": "Size",
+ "Taille glow": "Glow size",
+ "Texte": "Text",
+ "Tirets": "Dashed",
+ "Titre": "Title",
+ "Titre + Corps": "Title + Body",
+ "Titre seul": "Title only",
+ "Typographie": "Typography",
+ "caractères": "characters",
+ "erreur(s)": "error(s)",
+ "itérations limitées à": "iterations limited to",
+ "nom reserve, definition ignoree": "reserved name, definition ignored",
+ "pas une liste": "not a list",
+ "template → profondeur maximale": "template → maximum depth",
+ "template → sortie limitée à": "template → output limited to",
+ "var(--primary-color) ou #hex": "var(--primary-color) or #hex",
+ "Épaisseur": "Thickness",
+ "— thème HA —": "— HA theme —"
+};
+const _t = (fr) => {
+  if (_lang === 'fr' || fr == null || fr === '') return fr;
+  const k = String(fr).replace(/\s+/g, ' ').trim();
+  return _EN[k] ?? fr;
+};
+const _setLang = (h) => {
+  const l = /^fr/i.test(String(h?.locale?.language || h?.language || '')) ? 'fr' : 'en';
+  if (l === _lang) return false;
+  _lang = l; return true;
+};
+
 class NeonMarkdownCardEditor extends HTMLElement {
   constructor() {
     super();
@@ -2157,6 +2246,7 @@ class NeonMarkdownCardEditor extends HTMLElement {
   }
   set hass(h) {
     this._hass = h;
+    _setLang(h); if (this._built && this._bl !== _lang) this._rebuild();
     if (!this._built && this._config) {
       this._built = true;
       this._build();
@@ -2205,6 +2295,7 @@ class NeonMarkdownCardEditor extends HTMLElement {
   }
 
   _build() {
+    this._bl = _lang;
     this.innerHTML = `
       <style>
         :host { display:block; padding:4px 0; }
@@ -2232,15 +2323,15 @@ class NeonMarkdownCardEditor extends HTMLElement {
         .section-hidden { display:none; }
       </style>
       <div class="tabs">
-        <div class="tab-btn ${this._tab === "title" ? "active" : ""}" data-tab="title">Titre</div>
-        <div class="tab-btn ${this._tab === "body" ? "active" : ""}" data-tab="body">Corps</div>
-        <div class="tab-btn ${this._tab === "shared" ? "active" : ""}" data-tab="shared">Commun</div>
+        <div class="tab-btn ${this._tab === "title" ? "active" : ""}" data-tab="title">${_t('Titre')}</div>
+        <div class="tab-btn ${this._tab === "body" ? "active" : ""}" data-tab="body">${_t('Corps')}</div>
+        <div class="tab-btn ${this._tab === "shared" ? "active" : ""}" data-tab="shared">${_t('Commun')}</div>
       </div>
-      <div class="field"><label>Mode d'affichage</label>
+      <div class="field"><label>${_t("Mode d'affichage")}</label>
         <select data-root="mode">
-          <option value="title" ${(this._config?.mode ?? "both") === "title" ? "selected" : ""}>Titre seul</option>
-          <option value="body" ${(this._config?.mode ?? "both") === "body" ? "selected" : ""}>Corps seul</option>
-          <option value="both" ${(this._config?.mode ?? "both") === "both" ? "selected" : ""}>Titre + Corps</option>
+          <option value="title" ${(this._config?.mode ?? "both") === "title" ? "selected" : ""}>${_t('Titre seul')}</option>
+          <option value="body" ${(this._config?.mode ?? "both") === "body" ? "selected" : ""}>${_t('Corps seul')}</option>
+          <option value="both" ${(this._config?.mode ?? "both") === "both" ? "selected" : ""}>${_t('Titre + Corps')}</option>
         </select></div>
       <div id="tab-title" class="${this._tab === "title" ? "" : "section-hidden"}">${this._titleTab()}</div>
       <div id="tab-body" class="${this._tab === "body" ? "" : "section-hidden"}">${this._bodyTab()}</div>
@@ -2250,7 +2341,7 @@ class NeonMarkdownCardEditor extends HTMLElement {
   }
   _titleTab() {
     return `
-      <h3>Texte</h3>
+      <h3>${_t('Texte')}</h3>
       ${this._textarea("Titre", "title", "text", 'Mon Dashboard — templates {{ states("entity") }} supportés')}
       ${this._input("Icône", "title", "icon", "text", "mdi:home")}
       ${this._select("Position icône", "title", "icon_position", [
@@ -2258,15 +2349,15 @@ class NeonMarkdownCardEditor extends HTMLElement {
         ["right", "Droite"],
         ["top", "Dessus"],
       ])}
-      <h3>Typographie</h3>
+      <h3>${_t('Typographie')}</h3>
       ${this._fontSelect("Police", "title", "font_family")}
       <div class="row2">${this._px("Taille", "title", "font_size", "24")}${this._px("Épaisseur", "title", "font_weight", "600")}</div>
       <div class="row2">${this._toggle("Majuscules", "title", "uppercase")}${this._toggle("Italique", "title", "italic")}</div>
       ${this._px("Espacement", "title", "letter_spacing", "0")}
-      <h3>Couleurs</h3>
+      <h3>${_t('Couleurs')}</h3>
       ${this._color("Couleur texte", "title", "color", "#ffffff")}
       ${this._color("Couleur icône", "title", "icon_color", "#ffffff")}
-      <h3>Effets</h3>
+      <h3>${_t('Effets')}</h3>
       <div class="row2">${this._toggle("Glow", "title", "glow")}${this._toggle("Gradient", "title", "gradient")}</div>
       ${this._color("Couleur glow", "title", "glow_color", "#00fff9")}
       ${this._px("Taille glow", "title", "glow_size", "12")}
@@ -2278,14 +2369,14 @@ class NeonMarkdownCardEditor extends HTMLElement {
   }
   _bodyTab() {
     return `
-      <h3>Contenu</h3>
+      <h3>${_t('Contenu')}</h3>
       ${this._select("Format", "body", "format", [
         ["html", "HTML / Jinja"],
         ["markdown", "Markdown"],
       ])}
-      <p class="hint">HTML : blocs néon (div/span/svg/gradients). Markdown : **gras** [lien](url) # titre - liste. Les deux acceptent {% for %}, {% if %}, {{ states() }}, filtres |sort/map/join/format/clamp… + &lt;style&gt; scopé, data-entity → more-info</p>
+      <p class="hint">${_t(`HTML : blocs néon (div/span/svg/gradients). Markdown : **gras** [lien](url) # titre - liste. Les deux acceptent {% for %}, {% if %}, {{ states() }}, filtres |sort/map/join/format/clamp… + &lt;style&gt; scopé, data-entity → more-info`)}</p>
       ${this._textarea("Corps", "body", "content", '{% for a in state_attr("sensor.x","attackers")|sort(attribute="score",reverse=true) %}...{% endfor %}', "body")}
-      <h3>Typographie</h3>
+      <h3>${_t('Typographie')}</h3>
       ${this._fontSelect("Police", "body", "font_family")}
       ${this._px("Taille", "body", "font_size", "13")}
       ${this._color("Couleur texte", "body", "color", "#888888")}
@@ -2293,8 +2384,8 @@ class NeonMarkdownCardEditor extends HTMLElement {
   }
   _sharedTab() {
     return `
-      <h3>Police globale</h3>${this._fontSelect("Police", "shared", "font_family")}
-      <h3>Mise en page</h3>${this._padding()}
+      <h3>${_t('Police globale')}</h3>${this._fontSelect("Police", "shared", "font_family")}
+      <h3>${_t('Mise en page')}</h3>${this._padding()}
       ${this._select("Alignement H", "shared", "align_h", [
         ["left", "Gauche"],
         ["center", "Centre"],
@@ -2305,11 +2396,11 @@ class NeonMarkdownCardEditor extends HTMLElement {
         ["center", "Centre"],
         ["bottom", "Bas"],
       ])}
-      <h3>Fond</h3>
+      <h3>${_t('Fond')}</h3>
       ${this._color("Couleur fond", "shared", "bg_color", "#1a1a2e")}
       ${this._number("Opacité fond (0–1)", "shared", "bg_opacity", "0", "1", "0.05")}
       ${this._toggle("Flou fond", "shared", "bg_blur")}
-      <h3>Bordure</h3>
+      <h3>${_t('Bordure')}</h3>
       ${this._color("Couleur bordure", "shared", "border_color", "#444444")}
       <div class="row2">${this._px("Épaisseur", "shared", "border_width", "1")}${this._px("Radius", "shared", "border_radius", "12")}</div>
       ${this._select("Style", "shared", "border_style", [
@@ -2318,7 +2409,7 @@ class NeonMarkdownCardEditor extends HTMLElement {
         ["dotted", "Points"],
         ["none", "Aucun"],
       ])}
-      <h3>Interaction</h3>
+      <h3>${_t('Interaction')}</h3>
       ${this._select("Action au tap", "shared", "tap_action", [
         ["none", "Aucune"],
         ["navigate", "Navigation"],
@@ -2329,34 +2420,34 @@ class NeonMarkdownCardEditor extends HTMLElement {
     `;
   }
   _input(l, s, k, type = "text", ph = "") {
-    return `<div class="field"><label>${l}</label><input type="${type}" data-section="${s}" data-key="${k}" value="${this._get(s, k)}" placeholder="${ph}"/></div>`;
+    return `<div class="field"><label>${_t(l)}</label><input type="${type}" data-section="${s}" data-key="${k}" value="${this._get(s, k)}" placeholder="${_t(ph)}"/></div>`;
   }
   _textarea(l, s, k, ph = "", cls = "") {
-    return `<div class="field"><label>${l}</label><textarea class="${cls}" data-section="${s}" data-key="${k}" placeholder="${ph}">${this._get(s, k)}</textarea></div>`;
+    return `<div class="field"><label>${_t(l)}</label><textarea class="${cls}" data-section="${s}" data-key="${k}" placeholder="${_t(ph)}">${this._get(s, k)}</textarea></div>`;
   }
   _px(l, s, k, d = "") {
     const raw = this._get(s, k);
     const num = parseFloat(raw);
-    return `<div class="field"><label>${l}</label><div style="display:flex;gap:4px;align-items:center"><input type="number" data-section="${s}" data-key="${k}" data-px="1" value="${isNaN(num) ? "" : num}" placeholder="${d}" min="0" step="1" style="flex:1"/><span style="font-size:11px;color:var(--secondary-text-color)">px</span></div></div>`;
+    return `<div class="field"><label>${_t(l)}</label><div style="display:flex;gap:4px;align-items:center"><input type="number" data-section="${s}" data-key="${k}" data-px="1" value="${isNaN(num) ? "" : num}" placeholder="${d}" min="0" step="1" style="flex:1"/><span style="font-size:11px;color:var(--secondary-text-color)">px</span></div></div>`;
   }
   _select(l, s, k, opts) {
     const v = this._get(s, k);
-    return `<div class="field"><label>${l}</label><select data-section="${s}" data-key="${k}">${opts.map(([val, lbl]) => `<option value="${val}" ${String(v) === String(val) ? "selected" : ""}>${lbl}</option>`).join("")}</select></div>`;
+    return `<div class="field"><label>${_t(l)}</label><select data-section="${s}" data-key="${k}">${opts.map(([val, lbl]) => `<option value="${val}" ${String(v) === String(val) ? "selected" : ""}>${_t(lbl)}</option>`).join("")}</select></div>`;
   }
   _toggle(l, s, k) {
     const v = !!this._get(s, k);
-    return `<div class="field toggle-field"><label>${l}</label><label class="switch"><input type="checkbox" data-section="${s}" data-key="${k}" ${v ? "checked" : ""}/><span class="slider"></span></label></div>`;
+    return `<div class="field toggle-field"><label>${_t(l)}</label><label class="switch"><input type="checkbox" data-section="${s}" data-key="${k}" ${v ? "checked" : ""}/><span class="slider"></span></label></div>`;
   }
   _color(l, s, k, d = "#ffffff") {
     const v = this._get(s, k) || "";
-    return `<div class="field"><label>${l}</label><div class="color-row"><input type="color" data-section="${s}" data-key="${k}" value="${v || d}" ${!v ? 'style="opacity:0.4"' : ""}/><input type="text" data-section="${s}" data-key="${k}" value="${v}" placeholder="var(--primary-color) ou #hex"/></div></div>`;
+    return `<div class="field"><label>${_t(l)}</label><div class="color-row"><input type="color" data-section="${s}" data-key="${k}" value="${v || d}" ${!v ? 'style="opacity:0.4"' : ""}/><input type="text" data-section="${s}" data-key="${k}" value="${v}" placeholder="${_t('var(--primary-color) ou #hex')}"/></div></div>`;
   }
   _number(l, s, k, mn = "0", mx = "100", st = "1") {
-    return `<div class="field"><label>${l}</label><input type="number" data-section="${s}" data-key="${k}" value="${this._get(s, k)}" min="${mn}" max="${mx}" step="${st}"/></div>`;
+    return `<div class="field"><label>${_t(l)}</label><input type="number" data-section="${s}" data-key="${k}" value="${this._get(s, k)}" min="${mn}" max="${mx}" step="${st}"/></div>`;
   }
   _fontSelect(l, s, k) {
     const v = this._get(s, k);
-    return `<div class="field"><label>${l}</label><select data-section="${s}" data-key="${k}"><option value="" ${!v ? "selected" : ""}>— thème HA —</option>${NMC_FONTS.map((f) => `<option value="${f}" ${v === f ? "selected" : ""}>${f}</option>`).join("")}</select></div>`;
+    return `<div class="field"><label>${_t(l)}</label><select data-section="${s}" data-key="${k}"><option value="" ${!v ? "selected" : ""}>${_t('— thème HA —')}</option>${NMC_FONTS.map((f) => `<option value="${f}" ${v === f ? "selected" : ""}>${f}</option>`).join("")}</select></div>`;
   }
   _padding() {
     const raw = this._get("shared", "padding") || "8px 16px";
@@ -2489,6 +2580,7 @@ class NeonMarkdownCard extends HTMLElement {
     }
   }
   set hass(h) {
+    _setLang(h); if (this._lg !== _lang) { this._lg = _lang; this._forceUpdate = true; }
     const shouldUpdate = this._forceUpdate || nmcDependenciesChanged(this._dependencyInfo, this._lastHass, h);
     this._hass = h;
     this._lastHass = h;
@@ -2580,7 +2672,7 @@ class NeonMarkdownCard extends HTMLElement {
           html +=
             '<div style="margin-top:8px;padding:6px 8px;border:1px solid rgba(255,59,48,.6);background:rgba(255,59,48,.08);font-family:monospace;font-size:11px;line-height:1.5;color:#FF6B61;">⚠ nmc debug — ' +
             uniq.length +
-            " erreur(s)<br>" +
+            " " + _t('erreur(s)') + "<br>" +
             uniq.map(esc).join("<br>") +
             "</div>";
         }
@@ -2930,7 +3022,7 @@ window.customCards = window.customCards || [];
 window.customCards.push({
   type: "neon-markdown-card",
   name: "Neon Markdown Card",
-  description: "Header néon + corps HTML/Markdown/Jinja (for/if/filtres) — Neo Tokyo",
+  description: "Neon header + HTML/Markdown/Jinja body (for/if/filters), Neo Tokyo style",
   preview: true,
 });
 

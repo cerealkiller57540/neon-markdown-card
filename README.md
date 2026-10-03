@@ -131,7 +131,7 @@ body:
 
 **Can several cards share a macro?** Four macros ship with the engine (`fmt_eta`, `tuile`, `spark`, `hp_style`). Your own macros live in each card's body.
 
-**The editor labels are in French.** Translation is on the way. Every option can also be set in YAML.
+**Which languages are supported?** English and French. The editor and the card texts follow your Home Assistant language: French if it is French, English otherwise. Reload the page after changing the language. Every option can also be set in YAML.
 
 **Which theme is in the screenshots?** Neo Tokyo, the author's own dark theme (not published). The card works with any theme.
 
