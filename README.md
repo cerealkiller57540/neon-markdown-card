@@ -13,6 +13,8 @@
 
 <img src="https://raw.githubusercontent.com/cerealkiller57540/neon-markdown-card/main/images/main.png" alt="Seven dashboards built with Neon Markdown Card: a PC monitor, a network uplink panel, a world threat map, a solar farm, network ports and a weather station" width="900">
 
+<img src="https://raw.githubusercontent.com/cerealkiller57540/neon-markdown-card/main/images/live.webp" alt="The PC monitor panel, live: CPU ring, GPU fan, power feed, liquid loop and core matrix animating" width="380">
+
 </div>
 
 Every panel above is **one `neon-markdown-card`**: no other custom card, no template sensor written for it. The body is HTML (or Markdown) with Jinja-style templates, evaluated in the browser against the live states: `{% for %}` over an attribute list, `{% set %}`, macros, filters, SVG sparklines from the recorder history, `<style>` blocks with `@container` queries and keyframe animations. The header on top is a neon title with glow, gradient, flicker and CRT scanline.
