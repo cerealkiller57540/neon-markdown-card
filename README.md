@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🧩 Neon Markdown Card
+<img src="https://raw.githubusercontent.com/cerealkiller57540/neon-markdown-card/main/images/logo.png" alt="Neon Markdown Card" width="480">
 
 **A Markdown card for Home Assistant that renders full HTML, SVG and CSS from Jinja templates in the browser, under a neon header.**
 
