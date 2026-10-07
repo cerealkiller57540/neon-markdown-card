@@ -136,7 +136,7 @@
  *   macro du lot Heat Plant.
  */
 
-const NMC_VERSION = "4.10.2";
+const NMC_VERSION = "4.11.0";
 const NMC_MAX_TEMPLATE_OUTPUT = 100000;
 const NMC_MAX_TEMPLATE_ITERATIONS = 1000;
 const NMC_MAX_TEMPLATE_DEPTH = 32;
@@ -2292,13 +2292,15 @@ class NeonMarkdownCardEditor extends HTMLElement {
     this.innerHTML = `
       <style>
         :host { display:block; padding:4px 0; }
-        h3 { font-size:11px; font-weight:700; color:var(--primary-color); text-transform:uppercase; letter-spacing:1.5px; margin:16px 0 8px; padding-bottom:4px; border-bottom:1px solid var(--divider-color); }
+        neon-markdown-card-editor { --ned-label:color-mix(in srgb,var(--primary-text-color) 82%,transparent); --ned-dim:color-mix(in srgb,var(--primary-text-color) 60%,transparent); --ned-accent:color-mix(in srgb,var(--primary-color) 55%,var(--primary-text-color)); --ned-line:color-mix(in srgb,var(--primary-color) 55%,transparent); }
+        neon-markdown-card-editor ha-expansion-panel { --outline-color:var(--ned-line); --expansion-panel-summary-padding:0 12px; color:var(--primary-text-color); margin-bottom:8px; }
+        h3 { font-size:11px; font-weight:700; color:var(--ned-accent); text-transform:uppercase; letter-spacing:1.5px; margin:16px 0 8px; padding-bottom:4px; border-bottom:1px solid var(--ned-line); }
         .tabs { display:flex; gap:4px; margin-bottom:16px; }
-        .tab-btn { flex:1; padding:6px 0; border:1px solid var(--divider-color); border-radius:6px; background:transparent; color:var(--primary-text-color); font-size:12px; cursor:pointer; transition:all .2s; text-align:center; user-select:none; }
+        .tab-btn { flex:1; padding:6px 0; border:1px solid var(--ned-line); border-radius:6px; background:transparent; color:var(--primary-text-color); font-size:12px; cursor:pointer; transition:all .2s; text-align:center; user-select:none; }
         .tab-btn.active { background:var(--primary-color); color:#fff; border-color:var(--primary-color); }
         .field { margin-bottom:10px; }
-        label { display:block; font-size:11px; color:var(--secondary-text-color); margin-bottom:3px; }
-        input[type=text],input[type=number],select,textarea { width:100%; box-sizing:border-box; padding:6px 8px; border-radius:6px; border:1px solid var(--divider-color); background:var(--card-background-color); color:var(--primary-text-color); font-size:12px; }
+        label { display:block; font-size:11px; color:var(--ned-label); margin-bottom:3px; }
+        input[type=text],input[type=number],select,textarea { width:100%; box-sizing:border-box; padding:6px 8px; border-radius:6px; border:1px solid var(--ned-line); background:var(--card-background-color); color:var(--primary-text-color); font-size:12px; }
         textarea { resize:vertical; min-height:48px; font-family:'Share Tech Mono',monospace; }
         textarea.body { min-height:160px; }
         .row2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
@@ -2312,7 +2314,7 @@ class NeonMarkdownCardEditor extends HTMLElement {
         .slider:before { content:''; position:absolute; width:14px; height:14px; left:3px; bottom:3px; background:#fff; border-radius:50%; transition:.3s; }
         input:checked + .slider { background:var(--primary-color); }
         input:checked + .slider:before { transform:translateX(16px); }
-        .hint { font-size:10px; color:var(--disabled-text-color); margin:2px 0 0; }
+        .hint { font-size:10px; color:var(--ned-dim); margin:2px 0 0; }
         .section-hidden { display:none; }
       </style>
       <div class="tabs">
@@ -2330,6 +2332,7 @@ class NeonMarkdownCardEditor extends HTMLElement {
       <div id="tab-body" class="${this._tab === "body" ? "" : "section-hidden"}">${this._bodyTab()}</div>
       <div id="tab-shared" class="${this._tab === "shared" ? "" : "section-hidden"}">${this._sharedTab()}</div>
     `;
+    this.querySelectorAll('ha-expansion-panel').forEach(p => { p.outlined = true; p.header = _t(p.dataset.header); });
     this._attach();
     this._resolveSwatches();
     requestAnimationFrame(() => this._resolveSwatches()); // pas encore monté au 1er build
@@ -2366,15 +2369,17 @@ class NeonMarkdownCardEditor extends HTMLElement {
         ["right", "Droite"],
         ["top", "Dessus"],
       ])}
-      <h3>${_t('Typographie')}</h3>
+      <ha-expansion-panel data-header="Typographie">
       ${this._fontSelect("Police", "title", "font_family")}
       <div class="row2">${this._px("Taille", "title", "font_size", "24")}${this._px("Épaisseur", "title", "font_weight", "600")}</div>
       <div class="row2">${this._toggle("Majuscules", "title", "uppercase")}${this._toggle("Italique", "title", "italic")}</div>
       ${this._input("Espacement", "title", "letter_spacing", "text", "0.02em")}
-      <h3>${_t('Couleurs')}</h3>
+      </ha-expansion-panel>
+      <ha-expansion-panel data-header="Couleurs">
       ${this._color("Couleur texte", "title", "color", "var(--ha-card-header-color, var(--primary-text-color))")}
       ${this._color("Couleur icône", "title", "icon_color", this._get("title", "color") || "var(--ha-card-header-color, var(--primary-text-color))")}
-      <h3>${_t('Effets')}</h3>
+      </ha-expansion-panel>
+      <ha-expansion-panel data-header="Effets">
       <div class="row2">${this._toggle("Glow", "title", "glow")}${this._toggle("Gradient", "title", "gradient")}</div>
       ${this._color("Couleur glow", "title", "glow_color", "var(--primary-color, #00E8FF)")}
       ${this._px("Taille glow", "title", "glow_size", "12")}
@@ -2382,6 +2387,7 @@ class NeonMarkdownCardEditor extends HTMLElement {
       ${this._color("Gradient fin", "title", "gradient_to", "var(--accent-color, #FF50A0)")}
       <div class="row2">${this._toggle("Flicker", "title", "flicker")}${this._toggle("Scanline CRT", "title", "scanline")}</div>
       ${this._toggle("Hover Glitch", "title", "hover_glitch")}
+      </ha-expansion-panel>
     `;
   }
   _bodyTab() {
@@ -2393,16 +2399,17 @@ class NeonMarkdownCardEditor extends HTMLElement {
       ])}
       <p class="hint">${_t(`HTML : blocs néon (div/span/svg/gradients). Markdown : **gras** [lien](url) # titre - liste. Les deux acceptent {% for %}, {% if %}, {{ states() }}, filtres |sort/map/join/format/clamp… + &lt;style&gt; scopé, data-entity → more-info`)}</p>
       ${this._textarea("Corps", "body", "content", '{% for a in state_attr("sensor.x","attackers")|sort(attribute="score",reverse=true) %}...{% endfor %}', "body")}
-      <h3>${_t('Typographie')}</h3>
+      <ha-expansion-panel data-header="Typographie">
       ${this._fontSelect("Police", "body", "font_family")}
       ${this._px("Taille", "body", "font_size", "13")}
       ${this._color("Couleur texte", "body", "color", "#888888")}
+      </ha-expansion-panel>
     `;
   }
   _sharedTab() {
     return `
       <h3>${_t('Police globale')}</h3>${this._fontSelect("Police", "shared", "font_family")}
-      <h3>${_t('Mise en page')}</h3>${this._padding()}
+      <ha-expansion-panel data-header="Mise en page">${this._padding()}
       ${this._select("Alignement H", "shared", "align_h", [
         ["left", "Gauche"],
         ["center", "Centre"],
@@ -2413,11 +2420,13 @@ class NeonMarkdownCardEditor extends HTMLElement {
         ["center", "Centre"],
         ["bottom", "Bas"],
       ])}
-      <h3>${_t('Fond')}</h3>
+      </ha-expansion-panel>
+      <ha-expansion-panel data-header="Fond">
       ${this._color("Couleur fond", "shared", "bg_color", "#1a1a2e")}
       ${this._number("Opacité fond (0–1)", "shared", "bg_opacity", "0", "1", "0.05")}
       ${this._toggle("Flou fond", "shared", "bg_blur")}
-      <h3>${_t('Bordure')}</h3>
+      </ha-expansion-panel>
+      <ha-expansion-panel data-header="Bordure">
       ${this._color("Couleur bordure", "shared", "border_color", "#444444")}
       <div class="row2">${this._px("Épaisseur", "shared", "border_width", "1")}${this._px("Radius", "shared", "border_radius", "12")}</div>
       ${this._select("Style", "shared", "border_style", [
@@ -2426,7 +2435,8 @@ class NeonMarkdownCardEditor extends HTMLElement {
         ["dotted", "Points"],
         ["none", "Aucun"],
       ])}
-      <h3>${_t('Interaction')}</h3>
+      </ha-expansion-panel>
+      <ha-expansion-panel data-header="Interaction">
       ${this._select("Action au tap", "shared", "tap_action", [
         ["none", "Aucune"],
         ["navigate", "Navigation"],
@@ -2434,6 +2444,7 @@ class NeonMarkdownCardEditor extends HTMLElement {
       ])}
       ${this._input("Chemin navigation", "shared", "navigation_path", "text", "/lovelace/0")}
       ${this._input("Entité (more-info)", "shared", "entity", "text", "light.living_room")}
+      </ha-expansion-panel>
     `;
   }
   _input(l, s, k, type = "text", ph = "") {
