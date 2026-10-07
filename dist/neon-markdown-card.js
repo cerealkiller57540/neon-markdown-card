@@ -1,4 +1,4 @@
-/* ── neon-markdown-card v4.9.4 ──
+/* ── neon-markdown-card v4.10.1 ──
  * Header néon (repris de neon-header-card-v2) + BODY full HTML/Markdown/Jinja.
  *
  *   type: custom:neon-markdown-card
@@ -123,6 +123,12 @@
  *   appel simple hors boucle, appel dans un {% for %} sur une liste de dicts, coexistence
  *   avec hp_style().
  *
+ * ── v4.10.1 (07/10/2026) ──
+ *   - Éditeur : les carrés de couleur vides montrent la couleur RÉELLEMENT rendue
+ *     (défauts CSS résolus), plus #ffffff / #00fff9 en dur.
+ *   - letter_spacing : un nombre nu reste en px, une valeur avec unité ou un clamp()
+ *     passe tel quel (le parseFloat le cassait) ; champ texte dans l'éditeur.
+ *
  * ── v4.9.4 (08/09/2026) ──
  *   Macro partagee spark(hh, ent, label, hex, rgba) : motif de sparkline 24h (legende
  *   min/max/n pts + <svg> a 2 <polyline>) identique octet-pour-octet dans 4 cards Heat
@@ -132,7 +138,7 @@
  *   macro du lot Heat Plant.
  */
 
-const NMC_VERSION = "4.9.4";
+const NMC_VERSION = "4.10.1";
 const NMC_MAX_TEMPLATE_OUTPUT = 100000;
 const NMC_MAX_TEMPLATE_ITERATIONS = 1000;
 const NMC_MAX_TEMPLATE_DEPTH = 32;
@@ -2338,6 +2344,30 @@ class NeonMarkdownCardEditor extends HTMLElement {
       <div id="tab-shared" class="${this._tab === "shared" ? "" : "section-hidden"}">${this._sharedTab()}</div>
     `;
     this._attach();
+    this._resolveSwatches();
+    requestAnimationFrame(() => this._resolveSwatches()); // pas encore monté au 1er build
+  }
+  _resolveColor(css) {
+    if (!this.isConnected) return null;
+    try {
+      const probe = document.createElement("span");
+      probe.style.cssText = `color:${css};position:absolute;left:-9999px;top:-9999px`;
+      this.appendChild(probe);
+      const rgb = getComputedStyle(probe).color;
+      probe.remove();
+      const m = rgb.match(/(\d+),\s*(\d+),\s*(\d+)/);
+      return m ? "#" + [m[1], m[2], m[3]].map((n) => (+n).toString(16).padStart(2, "0")).join("") : null;
+    } catch {
+      return null;
+    }
+  }
+  _resolveSwatches() {
+    this.querySelectorAll("input[type=color][data-css-default]").forEach((inp) => {
+      const hex = this._resolveColor(inp.dataset.cssDefault);
+      if (!hex) return;
+      inp.dataset.default = hex;
+      if (!/^#[0-9a-f]{6}$/i.test(this._get(inp.dataset.section, inp.dataset.key) || "")) inp.value = hex;
+    });
   }
   _titleTab() {
     return `
@@ -2353,16 +2383,16 @@ class NeonMarkdownCardEditor extends HTMLElement {
       ${this._fontSelect("Police", "title", "font_family")}
       <div class="row2">${this._px("Taille", "title", "font_size", "24")}${this._px("Épaisseur", "title", "font_weight", "600")}</div>
       <div class="row2">${this._toggle("Majuscules", "title", "uppercase")}${this._toggle("Italique", "title", "italic")}</div>
-      ${this._px("Espacement", "title", "letter_spacing", "0")}
+      ${this._input("Espacement", "title", "letter_spacing", "text", "0.02em")}
       <h3>${_t('Couleurs')}</h3>
-      ${this._color("Couleur texte", "title", "color", "#ffffff")}
-      ${this._color("Couleur icône", "title", "icon_color", "#ffffff")}
+      ${this._color("Couleur texte", "title", "color", "var(--ha-card-header-color, var(--primary-text-color))")}
+      ${this._color("Couleur icône", "title", "icon_color", this._get("title", "color") || "var(--ha-card-header-color, var(--primary-text-color))")}
       <h3>${_t('Effets')}</h3>
       <div class="row2">${this._toggle("Glow", "title", "glow")}${this._toggle("Gradient", "title", "gradient")}</div>
-      ${this._color("Couleur glow", "title", "glow_color", "#00fff9")}
+      ${this._color("Couleur glow", "title", "glow_color", "var(--primary-color, #00E8FF)")}
       ${this._px("Taille glow", "title", "glow_size", "12")}
-      ${this._color("Gradient début", "title", "gradient_from", "#00E8FF")}
-      ${this._color("Gradient fin", "title", "gradient_to", "#FF50A0")}
+      ${this._color("Gradient début", "title", "gradient_from", "var(--primary-color, #00E8FF)")}
+      ${this._color("Gradient fin", "title", "gradient_to", "var(--accent-color, #FF50A0)")}
       <div class="row2">${this._toggle("Flicker", "title", "flicker")}${this._toggle("Scanline CRT", "title", "scanline")}</div>
       ${this._toggle("Hover Glitch", "title", "hover_glitch")}
     `;
@@ -2438,9 +2468,14 @@ class NeonMarkdownCardEditor extends HTMLElement {
     const v = !!this._get(s, k);
     return `<div class="field toggle-field"><label>${_t(l)}</label><label class="switch"><input type="checkbox" data-section="${s}" data-key="${k}" ${v ? "checked" : ""}/><span class="slider"></span></label></div>`;
   }
+  // d = défaut du RENDU : #hex, ou expression CSS résolue après montage (_resolveSwatches).
+  // Le picker natif n'accepte que #rrggbb : toute autre valeur l'afficherait en noir.
   _color(l, s, k, d = "#ffffff") {
     const v = this._get(s, k) || "";
-    return `<div class="field"><label>${_t(l)}</label><div class="color-row"><input type="color" data-section="${s}" data-key="${k}" value="${v || d}" ${!v ? 'style="opacity:0.4"' : ""}/><input type="text" data-section="${s}" data-key="${k}" value="${v}" placeholder="${_t('var(--primary-color) ou #hex')}"/></div></div>`;
+    const hex = /^#[0-9a-f]{6}$/i.test(v) ? v : "";
+    const css = d.startsWith("#") ? "" : d;
+    const fb = css ? "#ffffff" : d;
+    return `<div class="field"><label>${_t(l)}</label><div class="color-row"><input type="color" data-section="${s}" data-key="${k}" value="${hex || fb}" data-default="${fb}"${css ? ` data-css-default="${css}"` : ""} ${!hex ? 'style="opacity:0.4"' : ""}/><input type="text" data-section="${s}" data-key="${k}" value="${v}" placeholder="${_t('var(--primary-color) ou #hex')}"/></div></div>`;
   }
   _number(l, s, k, mn = "0", mx = "100", st = "1") {
     return `<div class="field"><label>${_t(l)}</label><input type="number" data-section="${s}" data-key="${k}" value="${this._get(s, k)}" min="${mn}" max="${mx}" step="${st}"/></div>`;
@@ -2498,6 +2533,12 @@ class NeonMarkdownCardEditor extends HTMLElement {
     this.querySelectorAll("[data-section][data-key]").forEach((inp) => {
       if (document.activeElement === inp) return;
       const v = this._get(inp.dataset.section, inp.dataset.key);
+      if (inp.type === "color") {
+        const hex = /^#[0-9a-f]{6}$/i.test(v || "") ? v : "";
+        inp.value = hex || inp.dataset.default || "#ffffff";
+        inp.style.opacity = hex ? "" : "0.4";
+        return;
+      }
       if (inp.type === "checkbox") inp.checked = !!v;
       else {
         const nv = v ?? "";
@@ -2774,7 +2815,10 @@ class NeonMarkdownCard extends HTMLElement {
     const tColor = t.color || "var(--ha-card-header-color, var(--primary-text-color))";
     const tIconColor = t.icon_color || tColor;
     const tIconSize = t.icon_size ? `${parseFloat(t.icon_size)}px` : `calc(${tFontSize} * 1.2)`;
-    const tLetterSp = t.letter_spacing ? `${parseFloat(t.letter_spacing)}px` : "0.02em";
+    // nombre nu (éditeur, ancienne config) = px ; "0.1em", clamp(), var() passent tels quels
+    const tLetterSp = t.letter_spacing
+      ? (/^-?\d*\.?\d+$/.test(String(t.letter_spacing).trim()) ? `${parseFloat(t.letter_spacing)}px` : String(t.letter_spacing))
+      : "0.02em";
     const tGlowColor = t.glow_color || "var(--primary-color, #00E8FF)";
     const tGlowSize = parseFloat(t.glow_size) || 12;
     const tGlowShadow = t.text_shadow
