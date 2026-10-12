@@ -1,4 +1,4 @@
-/* ── neon-markdown-card v4.10.2 ──
+/* ── neon-markdown-card v4.12.0 ──
  * Header néon (repris de neon-header-card-v2) + BODY full HTML/Markdown/Jinja.
  *
  *   type: custom:neon-markdown-card
@@ -134,9 +134,14 @@
  *   par la card (hist['entity_id'], expose .min/.max/.n/.pts) : pas eclate en 4 parametres
  *   separes, deja disponible tel quel dans chaque template appelant. Troisieme et derniere
  *   macro du lot Heat Plant.
+ *
+ * ── v4.12.0 (08/10/2026) ──
+ *   data-script="script.x" sur tout élément HTML/SVG → tap = script.turn_on, prioritaire
+ *   sur data-entity et le tap_action global. Limité au domaine script : un template ne
+ *   peut appeler aucun autre service.
  */
 
-const NMC_VERSION = "4.11.0";
+const NMC_VERSION = "4.12.0";
 const NMC_MAX_TEMPLATE_OUTPUT = 100000;
 const NMC_MAX_TEMPLATE_ITERATIONS = 1000;
 const NMC_MAX_TEMPLATE_DEPTH = 32;
@@ -1685,7 +1690,7 @@ const NMC_ALLOWED_TAGS = new Set([
   "TD",
   "TH",
 ]);
-const NMC_GLOBAL_ATTRS = new Set(["style", "class", "title", "aria-label", "role", "data-entity"]);
+const NMC_GLOBAL_ATTRS = new Set(["style", "class", "title", "aria-label", "role", "data-entity", "data-script"]);
 const NMC_TAG_ATTRS = {
   A: new Set(["href"]),
   IMG: new Set(["src", "alt", "width", "height", "loading"]),
@@ -1763,6 +1768,7 @@ const NMC_ALLOWED_SVG_ATTRS = new Set([
   "clip-path",
   "id",
   "data-entity",
+  "data-script",
   // v4.1 : attributs SMIL (+ pathLength pour normaliser les dash à 100)
   "pathlength",
   "attributename",
@@ -1955,6 +1961,10 @@ function nmcSanitizeBody(raw) {
             return;
           }
         }
+        if (an === "data-script" && !/^script\.[a-z0-9_]+$/.test(a.value.trim())) {
+          el.removeAttribute(a.name);
+          return;
+        }
         if (an === "data-entity" && !/^[a-z_]+\.[a-zA-Z0-9_]+$/.test(a.value.trim())) {
           el.removeAttribute(a.name);
           return;
@@ -1979,6 +1989,10 @@ function nmcSanitizeBody(raw) {
       }
       const allowed = NMC_GLOBAL_ATTRS.has(name) || (tagAttrs && tagAttrs.has(name));
       if (!allowed) {
+        el.removeAttribute(a.name);
+        return;
+      }
+      if (name === "data-script" && !/^script\.[a-z0-9_]+$/.test(a.value.trim())) {
         el.removeAttribute(a.name);
         return;
       }
@@ -2641,6 +2655,7 @@ class NeonMarkdownCard extends HTMLElement {
       this._updateBody();
     });
   }
+  getGridOptions() { return { columns: 12, min_columns: 3 }; }
   getCardSize() {
     const m = this._config?.mode ?? "both";
     return m === "title" ? 1 : 2;
@@ -2917,7 +2932,7 @@ class NeonMarkdownCard extends HTMLElement {
         .nmc-body ::-webkit-scrollbar-thumb:hover { background:#FF2D6B; }
         /* tuiles interactives : hover desktop (lève + éclaircit), inerte au tactile */
         .nmc-body .nmc-tile { transition:transform .15s ease, filter .15s ease; }
-        .nmc-body [data-entity] { cursor:pointer; }
+        .nmc-body [data-entity], .nmc-body [data-script] { cursor:pointer; }
         @media (hover:hover) { .nmc-body .nmc-tile:hover { transform:translateY(-2px) scale(1.02); filter:brightness(1.18); } }
         /* low-power (iPad/mobile/app Companion) : coupe les BALAYAGES continus coûteux
            injectés par un body markdown (scanlines, data-flow, shimmer, pulse-travel).
@@ -2997,10 +3012,18 @@ class NeonMarkdownCard extends HTMLElement {
     if (!this._ac) {
       this._ac = new AbortController();
 
-      // 0. data-entity="…" (v4.0) : tap → more-info, prioritaire sur le tap_action global
+      // 0. data-script="script.x" (v4.12) : tap → script.turn_on ; data-entity="…" (v4.0) : tap → more-info.
+      //    Tous deux prioritaires sur le tap_action global.
       card.addEventListener(
         "click",
         (e) => {
+          const run = e.target && e.target.closest ? e.target.closest("[data-script]") : null;
+          if (run) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            this._hass?.callService("script", "turn_on", { entity_id: run.getAttribute("data-script") });
+            return;
+          }
           const hit = e.target && e.target.closest ? e.target.closest("[data-entity]") : null;
           if (hit) {
             e.stopImmediatePropagation();
