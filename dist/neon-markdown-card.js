@@ -141,7 +141,7 @@
  *   peut appeler aucun autre service.
  */
 
-const NMC_VERSION = "4.12.0";
+const NMC_VERSION = "4.13.0";
 const NMC_MAX_TEMPLATE_OUTPUT = 100000;
 const NMC_MAX_TEMPLATE_ITERATIONS = 1000;
 const NMC_MAX_TEMPLATE_DEPTH = 32;
@@ -2060,6 +2060,7 @@ function nmcBuildConfig(raw) {
     glow: r.title?.glow ?? false,
     glow_color: r.title?.glow_color ?? null,
     glow_size: r.title?.glow_size ?? 12,
+    icon_glow_size: r.title?.icon_glow_size ?? null,
     gradient: r.title?.gradient ?? false,
     gradient_from: r.title?.gradient_from ?? null,
     gradient_to: r.title?.gradient_to ?? null,
@@ -2202,6 +2203,7 @@ const _EN = {
  "Style": "Style",
  "Taille": "Size",
  "Taille glow": "Glow size",
+ "Taille glow icône": "Icon glow size",
  "Texte": "Text",
  "Tirets": "Dashed",
  "Titre": "Title",
@@ -2397,6 +2399,7 @@ class NeonMarkdownCardEditor extends HTMLElement {
       <div class="row2">${this._toggle("Glow", "title", "glow")}${this._toggle("Gradient", "title", "gradient")}</div>
       ${this._color("Couleur glow", "title", "glow_color", "var(--primary-color, #00E8FF)")}
       ${this._px("Taille glow", "title", "glow_size", "12")}
+      ${this._px("Taille glow icône", "title", "icon_glow_size", this._get("title", "glow_size") || "12")}
       ${this._color("Gradient début", "title", "gradient_from", "var(--primary-color, #00E8FF)")}
       ${this._color("Gradient fin", "title", "gradient_to", "var(--accent-color, #FF50A0)")}
       <div class="row2">${this._toggle("Flicker", "title", "flicker")}${this._toggle("Scanline CRT", "title", "scanline")}</div>
@@ -2834,6 +2837,7 @@ class NeonMarkdownCard extends HTMLElement {
       : "0.02em";
     const tGlowColor = t.glow_color || "var(--primary-color, #00E8FF)";
     const tGlowSize = parseFloat(t.glow_size) || 12;
+    const tIconGlowSize = parseFloat(t.icon_glow_size) || tGlowSize;
     const tGlowShadow = t.text_shadow
       ? `text-shadow: ${t.text_shadow};`
       : t.glow
@@ -2966,7 +2970,7 @@ class NeonMarkdownCard extends HTMLElement {
           padding:${sh.padding}; ${mode === "both" ? "padding-bottom:12px;" : ""} position:relative; overflow:visible; }
         ${bothGrid ? `.nmc-wrap>.nmc-icon-wrap{grid-column:1;grid-row:1;} .nmc-wrap>.nmc-text-wrap{display:contents;} .nmc-text-wrap>.nmc-title{grid-column:2;grid-row:1;align-self:center;} .nmc-text-wrap>.nmc-body{grid-column:1 / -1;grid-row:2;width:100%;padding-top:10px;margin-top:8px;border-top:1px solid;border-image:linear-gradient(90deg, transparent, rgba(98,0,234,0.55), rgba(0,255,249,0.25), transparent) 1;} ${t.scanline ? `.nmc-wrap>.nmc-scanlines{grid-column:1 / -1;grid-row:1;inset:auto;position:absolute;top:0;left:0;right:0;bottom:auto;height:100%;pointer-events:none;z-index:2;}` : ""}` : mode === "both" ? `.nmc-title{padding-bottom:10px;margin-bottom:10px;border-bottom:1px solid;border-image:linear-gradient(90deg, transparent, rgba(98,0,234,0.55), rgba(0,255,249,0.25), transparent) 1;}` : ""}
         .nmc-icon-wrap { display:${hasIcon ? "flex" : "none"}; align-items:center; justify-content:center; flex-shrink:0; overflow:visible; }
-        .nmc-icon-wrap ha-icon { --mdc-icon-size:${tIconSize}; color:${tIconColor}; overflow:visible; ${t.glow ? `filter:drop-shadow(0 0 ${Math.round(tGlowSize * 0.2)}px #fff) drop-shadow(0 0 ${Math.round(tGlowSize * 0.4)}px ${tGlowColor}) drop-shadow(0 0 ${Math.round(tGlowSize * 0.8)}px ${tGlowColor}) drop-shadow(0 0 ${tGlowSize}px ${tGlowColor});` : ""} ${t.flicker && !t.hover_glitch ? tFlickAnim : ""} }
+        .nmc-icon-wrap ha-icon { --mdc-icon-size:${tIconSize}; color:${tIconColor}; overflow:visible; ${t.glow ? `filter:drop-shadow(0 0 ${Math.round(tIconGlowSize * 0.2)}px #fff) drop-shadow(0 0 ${Math.round(tIconGlowSize * 0.4)}px ${tGlowColor}) drop-shadow(0 0 ${Math.round(tIconGlowSize * 0.8)}px ${tGlowColor}) drop-shadow(0 0 ${tIconGlowSize}px ${tGlowColor});` : ""} ${t.flicker && !t.hover_glitch ? tFlickAnim : ""} }
         .nmc-text-wrap { display:flex; flex-direction:column; gap:3px; text-align:${textAlign}; ${iconTop ? "align-items:center;" : ""} ${sh.align_h !== "center" ? "flex:1;" : ""} min-width:0; overflow:visible; }
         .nmc-title { display:${showTitle ? "block" : "none"}; font-family:${tFontFamily}; font-size:${tFontSize}; font-weight:${t.font_weight || 600}; letter-spacing:${tLetterSp}; line-height:1.2; overflow:visible; ${t.uppercase ? "text-transform:uppercase;" : ""}${t.italic ? "font-style:italic;" : ""}${tGradCSS || `color:${tColor};`}${!t.hover_glitch ? tGlowShadow : ""}${!t.hover_glitch ? tFlickAnim : ""}${t.hover_glitch ? "transition:transform 0.2s,text-shadow 0.2s;" : ""} }
         .nmc-body { display:${showBody ? "block" : "none"}; font-family:${bFontFamily}; font-size:${bFontSize}; font-weight:400; line-height:1.4; overflow:visible; color:${bColor}; }

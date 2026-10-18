@@ -106,6 +106,7 @@ body:
 | `font_family` / `font_size` / `font_weight` / `letter_spacing` | theme | Font (Orbitron, Rajdhani… load automatically from Google Fonts) |
 | `uppercase` / `italic` | `false` | Text style |
 | `glow` / `glow_color` / `glow_size` | — | Neon glow |
+| `icon_glow_size` | `glow_size` | Title icon glow radius, independent of the text glow — a larger value spreads the halo thinner and keeps thin icons crisp |
 | `gradient` / `gradient_from` / `gradient_to` | — | Two-colour gradient text |
 | `flicker` / `scanline` / `hover_glitch` | `false` | Animations |
 
