@@ -57,7 +57,7 @@
  *     @import ou @font-face détecté.
  *   data-entity="sensor.x" sur tout élément HTML/SVG → tap = popup more-info (historique natif).
  *   debug: true (top-level) → les erreurs de template s'affichent sous le body.
- *   history: [{entity, hours}] (top-level) → var `hist['sensor.x']` = {pts,min,max,first,last,n}
+ *   history: [{entity, hours}] (top-level) → var `hist['sensor.x']` = {pts,ticks,end,min,max,first,last,n}
  *     pts = polyline normalisée x:0-100 y:0-30, rafraîchie ~5 min via /api/history.
  *     Ex : <svg viewBox="0 0 100 30"><polyline points="{{ hist['sensor.x'].pts }}" …/></svg>
  *   Filtres + : clamp(min,max) · format (mini-printf, args littéraux OU variables) · zfill(n)
@@ -139,9 +139,14 @@
  *   data-script="script.x" sur tout élément HTML/SVG → tap = script.turn_on, prioritaire
  *   sur data-entity et le tap_action global. Limité au domaine script : un template ne
  *   peut appeler aucun autre service.
+ *
+ * ── v4.15.0 (19/10/2026) ──
+ *   hist['x'].ticks = [{x, l, m, lab}] : repères horaires toutes les 6 h calés sur l'heure
+ *   locale (m = minuit, lab = étiquette affichable, loin du bord droit) ; hist['x'].end = HH:MM
+ *   de fin de fenêtre. Calculés avec le même t0/t1 que pts. Macro spark() : pointillés + axe.
  */
 
-const NMC_VERSION = "4.13.0";
+const NMC_VERSION = "4.15.1";
 const NMC_MAX_TEMPLATE_OUTPUT = 100000;
 const NMC_MAX_TEMPLATE_ITERATIONS = 1000;
 const NMC_MAX_TEMPLATE_DEPTH = 32;
@@ -160,10 +165,8 @@ const NMC_MAX_TEMPLATE_DEPTH = 32;
 // identiques : .tb .hz .tb-l .sec .tile .lbl .tv .tu). Un <style> emis par une macro
 // traverse nmcSanitizeBody intact, et deux <style> dans un meme body (ce bloc + un
 // @keyframes local) coexistent sans conflit. Zero parametre, pure emission de texte, zero risque arithmetique.
-// tuile(l, v, u, c, e) : motif de tuile (label/valeur/unite/couleur/entite) identique
-// dans plusieurs cards. 5 parametres positionnels, pure emission de texte : appel simple
-// hors boucle, appel dans un {% for %} sur une liste de dicts (t.l/t.v/t.u/t.c/t.e),
-// coexistence avec hp_style().
+// tuile(l, v, u, c, e, p=none) : tuile holo (grille teintee, 4 equerres) label/valeur/unite/couleur/entite. p optionnel (0-100) = barre de niveau,
+// a borner par l'appelant ; absent = pas de barre. Pure emission de texte.
 // spark(hh, ent, label, hex, rgba) : motif de sparkline 24h (legende min/max/n pts +
 // <svg> a 2 <polyline>, aire + trait). hh = l'objet hist['entity_id'] deja construit par
 // la card (expose .min/.max/.n/.pts), disponible tel quel via {% set hh = hist['x'] %}.
@@ -173,16 +176,20 @@ const NMC_MAX_TEMPLATE_DEPTH = 32;
 const NMC_SHARED_MACROS_SRC = `
 {% macro fmt_eta(base_min, minutes) %}{% set total = base_min + minutes %}{% set h = floor(total / 60) % 24 %}{% set m = total % 60 %}{{ h|zfill(2) }}:{{ m|zfill(2) }}{% endmacro %}
 {% macro hp_style() %}<style>.tb{display:flex;align-items:center;gap:8px;margin:2px 0 10px;}.hz{height:7px;flex:0 0 44px;background:repeating-linear-gradient(-45deg,rgba(255,179,0,.8) 0 6px,transparent 6px 12px);}.tb-l{font-size:10px;letter-spacing:2.5px;color:rgba(184,197,214,.66);}.sec{font-size:10px;letter-spacing:2px;color:rgba(184,197,214,.66);margin:0 0 5px;}.tile{background:rgba(13,18,30,.55);border:1px solid rgba(140,170,200,.16);padding:7px 4px;text-align:center;}.lbl{font-size:10px;letter-spacing:1px;color:rgba(184,197,214,.66);white-space:nowrap;overflow:hidden;}.tv{font-size:16px;font-weight:700;font-family:Consolas,monospace;color:#fff;}.tu{font-size:11px;color:rgba(184,197,214,.66);}</style>{% endmacro %}
-{% macro tuile(l, v, u, c, e) %}<div class="nmc-tile tile" data-entity="{{ e }}" style="border-top:2px solid {{ c }};">
-      <div class="lbl">{{ l }}</div>
-      <div class="tv" style="text-shadow:0 0 6px {{ c }};">{{ v }}</div>
-      <div class="tu">{{ u }}</div>
+{% macro tuile(l, v, u, c, e, p=none) %}<div class="nmc-tile" data-entity="{{ e }}" style="position:relative;overflow:hidden;padding:6px 4px 7px;text-align:center;background:linear-gradient(color-mix(in srgb, {{ c }} 9%, transparent) 1px,transparent 1px) 0 0/100% 8px,linear-gradient(90deg,color-mix(in srgb, {{ c }} 9%, transparent) 1px,transparent 1px) 0 0/8px 100%,radial-gradient(100% 90% at 50% 100%, color-mix(in srgb, {{ c }} 18%, transparent), rgba(6,8,16,.85) 75%);border:1px solid color-mix(in srgb, {{ c }} 25%, transparent);box-shadow:inset 0 0 18px -6px {{ c }};">
+      <span style="position:absolute;top:2px;left:2px;width:8px;height:8px;border-top:1.5px solid {{ c }};border-left:1.5px solid {{ c }};"></span><span style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-top:1.5px solid {{ c }};border-right:1.5px solid {{ c }};"></span>
+      <span style="position:absolute;bottom:2px;left:2px;width:8px;height:8px;border-bottom:1.5px solid {{ c }};border-left:1.5px solid {{ c }};"></span><span style="position:absolute;bottom:2px;right:2px;width:8px;height:8px;border-bottom:1.5px solid {{ c }};border-right:1.5px solid {{ c }};"></span>
+      <div class="lbl" style="color:{{ c }};opacity:.8;letter-spacing:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ l }}</div>
+      <div class="tv" style="font-size:20px;white-space:nowrap;color:{{ c }};text-shadow:0 0 6px {{ c }},0 0 16px color-mix(in srgb, {{ c }} 60%, transparent);">{{ v }}<span class="tu" style="margin-left:3px;font-size:10px;">{{ u }}</span></div>
+      {% if p is not none %}<div style="margin:5px 6px 0;height:3px;background:rgba(140,170,200,.12);"><div style="width:{{ p }}%;height:100%;background:linear-gradient(90deg,color-mix(in srgb, {{ c }} 30%, transparent),{{ c }});box-shadow:0 0 6px {{ c }};"></div></div>{% endif %}
     </div>{% endmacro %}
 {% macro spark(hh, ent, label, hex, rgba) %}<div class="sec" style="margin-top:12px;">{{ label }} — 24H — min {{ hh.min|round(1) }} · max {{ hh.max|round(1) }} · {{ hh.n }} pts</div>
   <svg viewBox="0 0 100 30" preserveAspectRatio="none" style="width:100%;height:36px;display:block;" data-entity="{{ ent }}">
+    {% for t in hh.ticks %}{% if t.m %}<line x1="{{ t.x }}" y1="0" x2="{{ t.x }}" y2="30" stroke="rgba(160,180,200,.35)" stroke-width="1" vector-effect="non-scaling-stroke"/>{% else %}<line x1="{{ t.x }}" y1="0" x2="{{ t.x }}" y2="30" stroke="rgba(160,180,200,.18)" stroke-width="1" stroke-dasharray="2 2" vector-effect="non-scaling-stroke"/>{% endif %}{% endfor %}
     <polyline points="0,30 {{ hh.pts }} 100,30" fill="rgba({{ rgba }},.09)" stroke="none"/>
     <polyline points="{{ hh.pts }}" fill="none" stroke="{{ hex }}" stroke-width="1" vector-effect="non-scaling-stroke" style="filter:drop-shadow(0 0 3px {{ hex }});"/>
-  </svg>{% endmacro %}
+  </svg>
+  <div style="position:relative;height:11px;margin-top:2px;font-size:8px;line-height:11px;letter-spacing:1px;color:rgba(160,180,200,.6);">{% for t in hh.ticks %}{% if t.lab %}<span style="position:absolute;left:{{ t.x }}%;transform:translateX(-50%);{% if t.m %}color:rgba(200,215,230,.85);{% endif %}">{{ t.l }}</span>{% endif %}{% endfor %}<span style="position:absolute;right:0;color:{{ hex }};">{{ hh.end }}</span></div>{% endmacro %}
 `;
 
 // ── Device detection ─────────────────────────────────────────────
@@ -2784,8 +2791,24 @@ class NeonMarkdownCard extends HTMLElement {
                 `${(((p.t - t0) / (t1 - t0)) * 100).toFixed(1)},${(30 - ((p.v - mn) / span) * 30).toFixed(1)}`
             )
             .join(" ");
+          // Repères toutes les 6 h sur l'heure locale ; marge 4 % aux bords, étiquette coupée
+          // au-delà de 88 % pour ne pas chevaucher l'heure de fin.
+          const ticks = [];
+          const step = 6 * 3600 * 1000;
+          const d0 = new Date(t0);
+          d0.setMinutes(0, 0, 0);
+          d0.setHours(Math.ceil((d0.getHours() + (d0 < t0 ? 1 : 0)) / 6) * 6);
+          for (let t = d0.getTime(); t < t1; t += step) {
+            const x = ((t - t0) / (t1 - t0)) * 100;
+            if (x < 4 || x > 96) continue;
+            const h = new Date(t).getHours();
+            ticks.push({ x: x.toFixed(1), l: `${String(h).padStart(2, "0")}h`, m: h === 0, lab: x < 88 });
+          }
+          const de = new Date(t1);
           out[hc.entity] = {
             pts: coords,
+            ticks,
+            end: `${String(de.getHours()).padStart(2, "0")}:${String(de.getMinutes()).padStart(2, "0")}`,
             min: mn,
             max: mx,
             first: pts[0].v,
@@ -3071,6 +3094,27 @@ class NeonMarkdownCard extends HTMLElement {
       );
     }
   }
+}
+// Une valeur de config interpolée dans un <style> ne doit pas pouvoir le refermer.
+function _nmcCfgSafe(v, path) {
+  if (typeof v === 'string') return v.replace(/<\/(style)/gi, '<\\/$1');
+  if (!v || typeof v !== 'object') return v;
+  const isArr = Array.isArray(v);
+  let out = v;
+  for (const k of Object.keys(v)) {
+    const p = isArr ? path : (path ? path + '.' + k : k);
+    if (['body.content', 'subtitle.text'].includes(p)) continue;
+    const nv = _nmcCfgSafe(v[k], p);
+    if (nv !== v[k]) {
+      if (out === v) out = isArr ? v.slice() : { ...v };
+      out[k] = nv;
+    }
+  }
+  return out;
+}
+{
+  const _setCfg = NeonMarkdownCard.prototype.setConfig;
+  NeonMarkdownCard.prototype.setConfig = function (c) { return _setCfg.call(this, _nmcCfgSafe(c, '')); };
 }
 customElements.define("neon-markdown-card", NeonMarkdownCard);
 
