@@ -25,7 +25,7 @@ Every panel above is **one `neon-markdown-card`**: no other custom card, no temp
 
 ## ✨ Features
 
-- **Client-side template engine**: `set`, `if / elif / else`, `for` (with `loop.*` and `else`), `macro`, `range()`, `now()`, `states()`, `state_attr()`, `states.domain.entity.attribute`, `as_timestamp()`, ternaries, `~` concatenation, and about thirty filters (`round`, `int`, `default`, `sort`, `map`, `selectattr`, `sum`, `clamp`, `format`, `zfill`, `thousands`…). No round-trip to the server: the card only re-renders when one of the entities it reads changes.
+- **Client-side template engine**: `set`, `if / elif / else`, `for` (with `loop.*` and `else`), `macro` (with keyword arguments and `{% call %}` / `caller()`), `range()`, `now()`, `states()`, `state_attr()`, `states.domain.entity.attribute`, `as_timestamp()`, ternaries, `~` concatenation, Python slicing (`items[:3]`, `text[-2:]`), and about thirty filters (`round`, `int`, `default`, `sort`, `map`, `selectattr`, `sum`, `clamp`, `format`, `zfill`, `thousands`, `indent`, `slice`…). No round-trip to the server: the card only re-renders when one of the entities it reads changes.
 - **Full HTML and SVG body**, sanitised: layout tags, tables, images from `/local`, inline SVG, `<style>` blocks scoped to the card (classes, `@container`, `@media`, gradients, `clip-path`, `mask`, animations). Scripts, event handlers, external URLs and `javascript:` links are removed.
 - **History sparklines**: declare `history: [{entity, hours}]` and draw `hist['sensor.x'].pts` straight into an SVG `<polyline>`.
 - **`data-entity="sensor.x"`** on any element opens the native more-info dialog on tap.
@@ -130,7 +130,7 @@ body:
 
 ## ❓ FAQ
 
-**Is this the same Jinja as Home Assistant?** No. It is a separate engine that runs in your browser and covers the common subset listed above. A template that works in the HA developer tools may need small changes (no `{% call %}`, no keyword arguments in macros, no `|` inside a composed arithmetic expression: use `floor()` instead of `|int` there). Turn on `debug: true` to see what fails.
+**Is this the same Jinja as Home Assistant?** No. It is a separate engine that runs in your browser and covers the common subset listed above. A template that works in the HA developer tools may need small changes (no `|` inside a composed arithmetic expression: use `floor()` instead of `|int` there). Turn on `debug: true` to see what fails.
 
 **Why are some of my tags or styles gone?** The body is sanitised. Scripts, `on*` attributes, external images, `@import`, external fonts and non-local `url()` are stripped on purpose.
 

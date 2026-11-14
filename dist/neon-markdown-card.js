@@ -20,14 +20,16 @@
  *   {% macro nom(a, b='def') %}…{% endmacro %}  puis {{ nom(x) }} — v4.8
  *                                      positionnels + valeurs par défaut ; le HTML rendu
  *                                      est sanitisé comme le reste ; récursion coupée à 32
- *                                      (pas de {% call %}, pas de kwargs)
+ *                                      kwargs nom=valeur à l'appel — v4.17
+ *   {% call m(a) %}…{% endcall %}      le corps = caller() dans m ; {% call(x) m() %} → caller(x)
+ *   x[a:b] / x[::-1]                  découpage liste/chaîne — v4.17
  *   x.champ / x.0.champ               notation pointée (objets/index)
  *   loop.index / index0 / first / last / length
  *   {{ expr }}                        + - * / ( ), == != > < >= <=, and/or/not, in,
  *                                      ternaire "A if C else B", ~ (concat)
  *   filtres : round float int abs upper lower title capitalize trim replace truncate
  *             default length thousands first last join reverse sum min max sort map
- *             selectattr list clamp format zfill
+ *             selectattr list clamp format zfill indent slice
  *             (sort/map/sum/min/max/selectattr acceptent attribute='champ')
  *
  * ── BODY : HTML autorisé ──
@@ -144,9 +146,21 @@
  *   hist['x'].ticks = [{x, l, m, lab}] : repères horaires toutes les 6 h calés sur l'heure
  *   locale (m = minuit, lab = étiquette affichable, loin du bord droit) ; hist['x'].end = HH:MM
  *   de fin de fenêtre. Calculés avec le même t0/t1 que pts. Macro spark() : pointillés + axe.
+ *
+ * ── v4.16.0 (26/10/2026) ──
+ *   now().strftime('%H:%M') : directives %H %I %M %S %p %d %e %m %y %Y %j %a %A %b %B %u %w %%.
+ *   Avant, l'expression sortait en texte brut. Noms de jours/mois dans la langue de hass.
+ *
+ * ── v4.17.0 (14/11/2026) ──
+ *   Macros : kwargs à l'appel (m(1, c=9)) ; argument inconnu signalé en debug.
+ *   {% call m(args) %}…{% endcall %} et {% call(x) m(args) %} : le corps devient caller() /
+ *     caller(x) dans la macro, évalué dans le scope du site d'appel.
+ *   x[a:b] / x[a:b:pas] : découpage Python sur liste ou chaîne (bornes négatives, pas -1).
+ *   Filtres : indent(width=4, first=false, blank=false) ; slice(n, fill_with) = Jinja,
+ *     découpe en n COLONNES (pour « les n premiers » : x[:n]).
  */
 
-const NMC_VERSION = "4.15.1";
+const NMC_VERSION = "4.17.0";
 const NMC_MAX_TEMPLATE_OUTPUT = 100000;
 const NMC_MAX_TEMPLATE_ITERATIONS = 1000;
 const NMC_MAX_TEMPLATE_DEPTH = 32;
@@ -264,7 +278,7 @@ const _nmcTagRe = /\{\{\s*([\s\S]+?)\s*\}\}|\{\%\s*([\s\S]+?)\s*\%\}/g;
 // --- reste soumis aux memes garde-fous (profondeur / iterations / taille) que le reste.
 const NMC_MACRO_PREFIX = "__nmc_macro_";
 const NMC_MACRO_RESERVED = new Set([
-  "range", "states", "is_state", "state_attr", "as_timestamp", "now", "loop",
+  "range", "states", "is_state", "state_attr", "as_timestamp", "now", "loop", "caller",
 ]);
 let _nmcCtx = null;
 let _nmcErrs = null;
@@ -280,6 +294,56 @@ function nmcMacroScope(vars) {
     root = proto;
   }
   return root;
+}
+
+// Appel de macro : positionnels puis kwargs (nom=valeur), defauts pour le reste.
+// `def.scope` (blocs {% call %}) : le corps de caller() s'evalue dans le scope du site
+// d'appel, pas dans celui de la macro qui l'invoque — sinon les params de la macro
+// masqueraient les variables du site d'appel.
+// `callerDef` : expose a la macro sous le nom caller().
+function nmcCallMacro(name, def, argStr, hass, vars, callerDef) {
+  const pos = [],
+    kws = {};
+  for (const raw of nmcSplitTop(argStr, ",")) {
+    const a = raw.trim();
+    if (a === "") continue;
+    const kv = a.match(/^([a-zA-Z_]\w*)\s*=(?!=)\s*([\s\S]+)$/);
+    if (kv) kws[kv[1]] = kv[2];
+    else pos.push(a);
+  }
+  const child = Object.create(def.scope || vars);
+  for (let i = 0; i < def.params.length; i++) {
+    const param = def.params[i];
+    // nmcEvalF (pas nmcEval) : un argument d'appel peut porter des filtres chaines
+    // (ex. tuile(rd|round(0)|int)) — nmcEval seul ignore tout ce qui suit un "|".
+    // Les arguments s'evaluent dans le scope de l'appelant (vars), les defauts aussi.
+    if (Object.prototype.hasOwnProperty.call(kws, param.name)) {
+      child[param.name] = nmcEvalF(kws[param.name], hass, vars);
+      delete kws[param.name];
+    } else if (i < pos.length) child[param.name] = nmcEvalF(pos[i], hass, vars);
+    else child[param.name] = param.def != null ? nmcEvalF(param.def, hass, vars) : "";
+  }
+  const unknown = Object.keys(kws);
+  if (unknown.length && _nmcErrs) _nmcErrs.push(`${name}() → ${_t('argument inconnu')} : ${unknown.join(", ")}`);
+  // Own-property sur le child : un caller() d'un {% call %} englobant reste masque.
+  child[NMC_MACRO_PREFIX + "caller"] = callerDef || undefined;
+  // on reutilise le ctx du rendu en cours : la recursion est coupee par
+  // NMC_MAX_TEMPLATE_DEPTH au lieu de figer le navigateur.
+  return nmcRenderNodes(def.body, hass, child, _nmcErrs, _nmcCtx);
+}
+
+// "a, b='def'" -> [{name:'a', def:null}, {name:'b', def:"'def'"}]
+function nmcParseParams(src) {
+  return nmcSplitTop(src, ",")
+    .map((raw) => {
+      const seg = raw.trim();
+      if (!seg) return null;
+      const eq = nmcSplitTop(seg, "=");
+      return eq.length > 1
+        ? { name: eq[0].trim(), def: eq.slice(1).join("=").trim() }
+        : { name: seg, def: null };
+    })
+    .filter((param) => param && /^[a-zA-Z_]\w*$/.test(param.name));
 }
 
 function nmcCompile(text) {
@@ -330,18 +394,17 @@ function nmcCompile(text) {
         const body = parseSeq(["endmacro"]);
         if (i < tokens.length && tokens[i].t === "tag" && tokens[i].s.startsWith("endmacro")) i++;
         if (mm) {
-          const params = nmcSplitTop(mm[2], ",")
-            .map((raw) => {
-              const seg = raw.trim();
-              if (!seg) return null;
-              const eq = nmcSplitTop(seg, "=");
-              return eq.length > 1
-                ? { name: eq[0].trim(), def: eq.slice(1).join("=").trim() }
-                : { name: seg, def: null };
-            })
-            .filter((param) => param && /^[a-zA-Z_]\w*$/.test(param.name));
-          nodes.push({ t: "macro", name: mm[1], params, body });
+          nodes.push({ t: "macro", name: mm[1], params: nmcParseParams(mm[2]), body });
         }
+      } else if (kw === "call" || kw.startsWith("call(")) {
+        // {% call nom(args) %} ... {% endcall %}  ou  {% call(x, y) nom(args) %}
+        // (le kw est "call(x," quand caller() prend des params : split sur l'espace)
+        const mm = tk.s.match(/^call\s*(?:\(([^()]*)\))?\s*([a-zA-Z_]\w*)\s*\(([\s\S]*)\)\s*$/);
+        i++;
+        const body = parseSeq(["endcall"]);
+        if (i < tokens.length && tokens[i].t === "tag" && tokens[i].s.startsWith("endcall")) i++;
+        if (mm)
+          nodes.push({ t: "call", callerParams: nmcParseParams(mm[1] || ""), name: mm[2], args: mm[3], body });
       } else if (kw === "if") {
         i++;
         const branches = [
@@ -447,6 +510,20 @@ function nmcRenderNodes(nodes, hass, vars, errs, ctx) {
           warn(`macro ${n.name} → ${_t('nom reserve, definition ignoree')}`);
         } else {
           nmcMacroScope(vars)[NMC_MACRO_PREFIX + n.name] = { params: n.params, body: n.body };
+        }
+        continue;
+      }
+      if (n.t === "call") {
+        const def = vars[NMC_MACRO_PREFIX + n.name];
+        if (!def) {
+          if (errs) errs.push(`call ${n.name}() → ${_t('macro inconnue')}`);
+          continue;
+        }
+        try {
+          const callerDef = { params: n.callerParams, body: n.body, scope: vars };
+          append(nmcCallMacro(n.name, def, n.args, hass, vars, callerDef));
+        } catch (e) {
+          if (errs) errs.push(`call ${n.name}() → ${(e && e.message) || e}`);
         }
         continue;
       }
@@ -788,6 +865,41 @@ function nmcSplitTop(s, sep) {
   return out;
 }
 
+function nmcStrftime(d, fmt, lang) {
+  const p2 = (n) => String(n).padStart(2, "0");
+  const name = (opts) => {
+    try {
+      return new Intl.DateTimeFormat(lang || "en", opts).format(d);
+    } catch (e) {
+      return new Intl.DateTimeFormat("en", opts).format(d);
+    }
+  };
+  const h12 = d.getHours() % 12 || 12;
+  const jan1 = new Date(d.getFullYear(), 0, 1);
+  const yday = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - jan1) / 864e5) + 1;
+  const map = {
+    H: () => p2(d.getHours()),
+    I: () => p2(h12),
+    M: () => p2(d.getMinutes()),
+    S: () => p2(d.getSeconds()),
+    p: () => (d.getHours() < 12 ? "AM" : "PM"),
+    d: () => p2(d.getDate()),
+    e: () => String(d.getDate()).padStart(2, " "),
+    m: () => p2(d.getMonth() + 1),
+    y: () => p2(d.getFullYear() % 100),
+    Y: () => String(d.getFullYear()),
+    j: () => String(yday).padStart(3, "0"),
+    a: () => name({ weekday: "short" }),
+    A: () => name({ weekday: "long" }),
+    b: () => name({ month: "short" }),
+    B: () => name({ month: "long" }),
+    u: () => String(d.getDay() || 7),
+    w: () => String(d.getDay()),
+    "%": () => "%",
+  };
+  return fmt.replace(/%(.)/g, (all, c) => (map[c] ? map[c]() : all));
+}
+
 function nmcAtom(s, hass, vars) {
   s = s.trim();
   if (s === "") return "";
@@ -805,6 +917,8 @@ function nmcAtom(s, hass, vars) {
         : current.getSeconds();
   }
   if (s === "now()") return new Date();
+  const strfMatch = s.match(/^now\(\)\.strftime\(\s*(['"])([\s\S]*)\1\s*\)$/);
+  if (strfMatch) return nmcStrftime(new Date(), strfMatch[2], hass && (hass.locale?.language || hass.language));
   const rangeMatch = s.match(/^range\(([^()]*)\)$/);
   if (rangeMatch) {
     const args = nmcSplitTop(rangeMatch[1], ",").map((arg) => Number(nmcEval(arg.trim(), hass, vars)));
@@ -863,6 +977,36 @@ function nmcAtom(s, hass, vars) {
       return st && st.attributes ? (st.attributes[attr] ?? "") : "";
     }
   }
+  // découpage Python base[a:b] / base[a:b:pas] sur liste ou chaîne (ex: items[:3], s[-2:]).
+  // Doit passer AVANT l'accès par clé : sinon "a:b" serait évalué comme une clé.
+  {
+    const ms = s.match(/^([a-zA-Z_]\w*(?:\.[a-zA-Z_0-9]\w*)*|\([^]*\))\s*\[([^]*)\]$/);
+    const parts = ms ? nmcSplitTop(ms[2], ":") : null;
+    if (parts && parts.length >= 2 && parts.length <= 3) {
+      const base = nmcEval(ms[1], hass, vars);
+      if (Array.isArray(base) || typeof base === "string") {
+        const num = (p) => {
+          if (p.trim() === "") return null;
+          const v = Math.trunc(Number(nmcEvalF(p, hass, vars)));
+          return Number.isFinite(v) ? v : null;
+        };
+        const len = base.length;
+        const step = parts.length === 3 ? num(parts[2]) ?? 1 : 1;
+        if (step === 0) return Array.isArray(base) ? [] : "";
+        const norm = (v, dflt) => (v == null ? dflt : v < 0 ? Math.max(v + len, step < 0 ? -1 : 0) : Math.min(v, step < 0 ? len - 1 : len));
+        const start = norm(num(parts[0]), step > 0 ? 0 : len - 1);
+        const stop = norm(num(parts[1]), step > 0 ? len : -1);
+        const seq = Array.isArray(base) ? base : Array.from(base);
+        const out = [];
+        for (let k = start; step > 0 ? k < stop : k > stop; k += step) {
+          out.push(seq[k]);
+          if (out.length >= NMC_MAX_TEMPLATE_ITERATIONS) break;
+        }
+        return Array.isArray(base) ? out : out.join("");
+      }
+      return "";
+    }
+  }
   // accès dict/list par CLÉ DYNAMIQUE : base[expr]  (ex: colors[nm], row[i])
   // base = var connue ou expression entre (), la clé est ré-évaluée
   {
@@ -912,22 +1056,12 @@ function nmcAtom(s, hass, vars) {
   // appel de macro : nom(args...) defini par {% macro %}
   {
     const mc = s.match(/^([a-zA-Z_]\w*)\s*\(([\s\S]*)\)$/);
-    if (mc && vars[NMC_MACRO_PREFIX + mc[1]]) {
-      const def = vars[NMC_MACRO_PREFIX + mc[1]];
-      const args = nmcSplitTop(mc[2], ",")
-        .map((a) => a.trim())
-        .filter((a) => a !== "");
-      const child = Object.create(vars);
-      for (let i = 0; i < def.params.length; i++) {
-        const param = def.params[i];
-        // nmcEvalF (pas nmcEval) : un argument d'appel peut porter des filtres chaines
-        // (ex. tuile(rd|round(0)|int)) — nmcEval seul ignore tout ce qui suit un "|".
-        if (i < args.length) child[param.name] = nmcEvalF(args[i], hass, vars);
-        else child[param.name] = param.def != null ? nmcEvalF(param.def, hass, vars) : "";
-      }
-      // on reutilise le ctx du rendu en cours : la recursion est coupee par
-      // NMC_MAX_TEMPLATE_DEPTH au lieu de figer le navigateur.
-      return nmcRenderNodes(def.body, hass, child, _nmcErrs, _nmcCtx);
+    if (mc && vars[NMC_MACRO_PREFIX + mc[1]])
+      return nmcCallMacro(mc[1], vars[NMC_MACRO_PREFIX + mc[1]], mc[2], hass, vars, null);
+    if (mc && mc[1] === "caller") {
+      // macro appelee par {{ m() }} et non par {% call %} : rien a injecter
+      if (_nmcErrs) _nmcErrs.push(`caller() → ${_t('hors d\'un bloc call')}`);
+      return "";
     }
   }
   if (s in vars) return vars[s];
@@ -1379,6 +1513,37 @@ function nmcApplyFilters(val, filterStr, hass, vars) {
         const n = parseInt(a0) || 80;
         const s = String(r);
         r = s.length > n ? s.slice(0, n) + (a[1] ? String(a[1].val) : "…") : s;
+        break;
+      }
+      case "indent": {
+        // Jinja : indent(width=4, first=false, blank=false) ; width peut etre une chaine.
+        const w = kw.width !== undefined ? kw.width : a0 !== undefined ? a0 : 4;
+        const first = kw.first !== undefined ? kw.first : a[1] && !a[1].key ? a[1].val : false;
+        const blank = kw.blank !== undefined ? kw.blank : a[2] && !a[2].key ? a[2].val : false;
+        const pad = typeof w === "string" ? w : " ".repeat(Math.max(0, Math.min(200, parseInt(w) || 0)));
+        r = String(r == null ? "" : r)
+          .split("\n")
+          .map((line, i) => ((i > 0 || first === true) && (blank === true || line.trim() !== "") ? pad + line : line))
+          .join("\n");
+        break;
+      }
+      case "slice": {
+        // Jinja : slice(n, fill_with) decoupe une liste en n colonnes (algo de jinja2.filters.do_slice).
+        const seq = Array.isArray(r) ? r : typeof r === "string" ? Array.from(r) : [];
+        const n = Math.max(1, Math.min(NMC_MAX_TEMPLATE_ITERATIONS, parseInt(a0) || 1));
+        const fill = kw.fill_with !== undefined ? kw.fill_with : a[1] && !a[1].key ? a[1].val : undefined;
+        const per = Math.floor(seq.length / n),
+          extra = seq.length % n;
+        const outCols = [];
+        let offset = 0;
+        for (let k = 0; k < n; k++) {
+          const start = offset + k * per;
+          if (k < extra) offset++;
+          const col = seq.slice(start, offset + (k + 1) * per);
+          if (fill !== undefined && fill !== null && k >= extra) col.push(fill);
+          outCols.push(col);
+        }
+        r = outCols;
         break;
       }
       case "default":
@@ -2222,6 +2387,9 @@ const _EN = {
  "itérations limitées à": "iterations limited to",
  "nom reserve, definition ignoree": "reserved name, definition ignored",
  "pas une liste": "not a list",
+ "argument inconnu": "unknown argument",
+ "macro inconnue": "unknown macro",
+ "hors d'un bloc call": "outside a call block",
  "template → profondeur maximale": "template → maximum depth",
  "template → sortie limitée à": "template → output limited to",
  "var(--primary-color) ou #hex": "var(--primary-color) or #hex",
