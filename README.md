@@ -103,7 +103,7 @@ body:
 |---|---|---|
 | `text` / `icon` / `icon_position` | — | Title text, `mdi:` icon, icon left or right |
 | `color` / `icon_color` | theme | Text and icon colour |
-| `font_family` / `font_size` / `font_weight` / `letter_spacing` | theme | Font (Orbitron, Rajdhani… load automatically from Google Fonts) |
+| `font_family` / `font_size` / `font_weight` / `letter_spacing` | theme | Font (Orbitron, Rajdhani… a name you set here is loaded from Google Fonts) |
 | `uppercase` / `italic` | `false` | Text style |
 | `glow` / `glow_color` / `glow_size` | — | Neon glow |
 | `icon_glow_size` | `glow_size` | Title icon glow radius, independent of the text glow — a larger value spreads the halo thinner and keeps thin icons crisp |
@@ -133,6 +133,8 @@ body:
 **Is this the same Jinja as Home Assistant?** No. It is a separate engine that runs in your browser and covers the common subset listed above. A template that works in the HA developer tools may need small changes (no `|` inside a composed arithmetic expression: use `floor()` instead of `|int` there). Turn on `debug: true` to see what fails.
 
 **Why are some of my tags or styles gone?** The body is sanitised. Scripts, `on*` attributes, external images, `@import`, external fonts and non-local `url()` are stripped on purpose.
+
+**Does the card contact Google Fonts?** Not by default. Text inherits your theme font and no request leaves your Home Assistant. Only if you set a font name in `font_family` (header, body or whole card) does the card load that family from `fonts.googleapis.com`. Leave it empty to keep everything local: any name you enter, even a font already on your device, is requested from Google.
 
 **Can several cards share a macro?** Four macros ship with the engine (`fmt_eta`, `tuile`, `spark`, `hp_style`). Your own macros live in each card's body.
 
