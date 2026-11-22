@@ -1,4 +1,4 @@
-/* ── neon-markdown-card v4.12.0 ──
+/* ── neon-markdown-card v4.17.1 ──
  * Header néon (repris de neon-header-card-v2) + BODY full HTML/Markdown/Jinja.
  *
  *   type: custom:neon-markdown-card
@@ -158,9 +158,12 @@
  *   x[a:b] / x[a:b:pas] : découpage Python sur liste ou chaîne (bornes négatives, pas -1).
  *   Filtres : indent(width=4, first=false, blank=false) ; slice(n, fill_with) = Jinja,
  *     découpe en n COLONNES (pour « les n premiers » : x[:n]).
+ *
+ * ── v4.17.1 (22/11/2026) ──
+ *   Bandeau d'en-tête aligné sur NMC_VERSION (posé par stamp_version.py).
  */
 
-const NMC_VERSION = "4.17.0";
+const NMC_VERSION = "4.17.1";
 const NMC_MAX_TEMPLATE_OUTPUT = 100000;
 const NMC_MAX_TEMPLATE_ITERATIONS = 1000;
 const NMC_MAX_TEMPLATE_DEPTH = 32;
