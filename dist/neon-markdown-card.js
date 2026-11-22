@@ -1,4 +1,4 @@
-/* ── neon-markdown-card v4.17.1 ──
+/* ── neon-markdown-card v4.17.2 ──
  * Header néon (repris de neon-header-card-v2) + BODY full HTML/Markdown/Jinja.
  *
  *   type: custom:neon-markdown-card
@@ -161,9 +161,16 @@
  *
  * ── v4.17.1 (22/11/2026) ──
  *   Bandeau d'en-tête aligné sur NMC_VERSION (posé par stamp_version.py).
+ *
+ * ── v4.17.2 (22/11/2026) ──
+ *   Éditeur : valeurs de config échappées dans value="…" et <textarea> (un corps contenant
+ *   </textarea> ou une entité &lt; ne casse plus le formulaire ni ne se décode à la réouverture).
  */
 
-const NMC_VERSION = "4.17.1";
+const NMC_VERSION = "4.17.2";
+
+// Valeur de config remise dans le HTML de l'éditeur (attribut ou <textarea>) : échappée pour qu'elle ressorte à l'identique.
+function nmcEscAttr(v) { return String(v ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 const NMC_MAX_TEMPLATE_OUTPUT = 100000;
 const NMC_MAX_TEMPLATE_ITERATIONS = 1000;
 const NMC_MAX_TEMPLATE_DEPTH = 32;
@@ -2643,10 +2650,10 @@ class NeonMarkdownCardEditor extends HTMLElement {
     `;
   }
   _input(l, s, k, type = "text", ph = "") {
-    return `<div class="field"><label>${_t(l)}</label><input type="${type}" data-section="${s}" data-key="${k}" value="${this._get(s, k)}" placeholder="${_t(ph)}"/></div>`;
+    return `<div class="field"><label>${_t(l)}</label><input type="${type}" data-section="${s}" data-key="${k}" value="${nmcEscAttr(this._get(s, k))}" placeholder="${_t(ph)}"/></div>`;
   }
   _textarea(l, s, k, ph = "", cls = "") {
-    return `<div class="field"><label>${_t(l)}</label><textarea class="${cls}" data-section="${s}" data-key="${k}" placeholder="${_t(ph)}">${this._get(s, k)}</textarea></div>`;
+    return `<div class="field"><label>${_t(l)}</label><textarea class="${cls}" data-section="${s}" data-key="${k}" placeholder="${_t(ph)}">${nmcEscAttr(this._get(s, k))}</textarea></div>`;
   }
   _px(l, s, k, d = "") {
     const raw = this._get(s, k);
@@ -2668,10 +2675,10 @@ class NeonMarkdownCardEditor extends HTMLElement {
     const hex = /^#[0-9a-f]{6}$/i.test(v) ? v : "";
     const css = d.startsWith("#") ? "" : d;
     const fb = css ? "#ffffff" : d;
-    return `<div class="field"><label>${_t(l)}</label><div class="color-row"><input type="color" data-section="${s}" data-key="${k}" value="${hex || fb}" data-default="${fb}"${css ? ` data-css-default="${css}"` : ""} ${!hex ? 'style="opacity:0.4"' : ""}/><input type="text" data-section="${s}" data-key="${k}" value="${v}" placeholder="${_t('var(--primary-color) ou #hex')}"/></div></div>`;
+    return `<div class="field"><label>${_t(l)}</label><div class="color-row"><input type="color" data-section="${s}" data-key="${k}" value="${hex || fb}" data-default="${fb}"${css ? ` data-css-default="${css}"` : ""} ${!hex ? 'style="opacity:0.4"' : ""}/><input type="text" data-section="${s}" data-key="${k}" value="${nmcEscAttr(v)}" placeholder="${_t('var(--primary-color) ou #hex')}"/></div></div>`;
   }
   _number(l, s, k, mn = "0", mx = "100", st = "1") {
-    return `<div class="field"><label>${_t(l)}</label><input type="number" data-section="${s}" data-key="${k}" value="${this._get(s, k)}" min="${mn}" max="${mx}" step="${st}"/></div>`;
+    return `<div class="field"><label>${_t(l)}</label><input type="number" data-section="${s}" data-key="${k}" value="${nmcEscAttr(this._get(s, k))}" min="${mn}" max="${mx}" step="${st}"/></div>`;
   }
   _fontSelect(l, s, k) {
     const v = this._get(s, k);
