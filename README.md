@@ -26,9 +26,11 @@ Every panel above is **one `neon-markdown-card`**: no other custom card, no temp
 ## ✨ Features
 
 - **Client-side template engine**: `set`, `if / elif / else`, `for` (with `loop.*` and `else`), `macro` (with keyword arguments and `{% call %}` / `caller()`), `range()`, `now()`, `states()`, `state_attr()`, `states.domain.entity.attribute`, `as_timestamp()`, ternaries, `~` concatenation, Python slicing (`items[:3]`, `text[-2:]`), and about thirty filters (`round`, `int`, `default`, `sort`, `map`, `selectattr`, `sum`, `clamp`, `format`, `zfill`, `thousands`, `indent`, `slice`…). No round-trip to the server: the card only re-renders when one of the entities it reads changes.
+- **Escaped by default**: `{{ expression }}` prints text. A state, an attribute or a variable that contains `<b>` shows `<b>`, it does not become markup. HTML you build on purpose goes through `|safe` or a macro (see [Upgrading to 5.0](#upgrading-to-50)).
 - **Full HTML and SVG body**, sanitised: layout tags, tables, images from `/local`, inline SVG, `<style>` blocks scoped to the card (classes, `@container`, `@media`, gradients, `clip-path`, `mask`, animations). Scripts, event handlers, external URLs and `javascript:` links are removed.
 - **History sparklines**: declare `history: [{entity, hours}]` and draw `hist['sensor.x'].pts` straight into an SVG `<polyline>`.
 - **`data-entity="sensor.x"`** on any element opens the native more-info dialog on tap.
+- **`data-toggle="light.x"`** toggles an entity on tap; **`data-step="input_number.x|-0.5"`** changes a `number` / `input_number` by the given delta (kept within its min and max). Only entity ids written literally in the body are obeyed: an id that comes from a state or an attribute is ignored.
 - **Neon header**, the same as [neon-header-card](https://github.com/cerealkiller57540/Home-Assistant-Neon-Cards): icon, glow, two-colour gradient, flicker, scanline, hover glitch. Use `mode: title`, `body` or `both`.
 - **25 ready-made keyframes** (`nmc-flicker`, `nmc-scan-scroll`, `nmc-ring-spin`, `nmc-data-flow`, `nmc-pulse-travel`, `nmc-dash-crawl`…) to use in inline `animation:`.
 - **Visual editor** for the header and frame; the body is edited as text.
@@ -131,6 +133,21 @@ body:
 ## ❓ FAQ
 
 **Is this the same Jinja as Home Assistant?** No. It is a separate engine that runs in your browser and covers the common subset listed above. A template that works in the HA developer tools may need small changes (no `|` inside a composed arithmetic expression: use `floor()` instead of `|int` there). Turn on `debug: true` to see what fails.
+
+<a id="upgrading-to-50"></a>**I upgraded to 5.0 and my HTML shows as text.** Since 5.0, `{{ }}` escapes its value, like Jinja with autoescape on. Markup written in the body itself is untouched; only markup built inside an expression is affected. Two ways to keep it:
+
+```jinja
+{# 4.x: the <b> came out bold. 5.0: it shows as text #}
+{{ '<b>' ~ states('sensor.x') ~ '</b>' }}
+
+{# 5.0: write the tags in the body, keep the value in {{ }} #}
+<b>{{ states('sensor.x') }}</b>
+
+{# 5.0: or mark a string you built yourself as safe #}
+{% set badge = '<b>' ~ states('sensor.x') ~ '</b>' %}{{ badge | safe }}
+```
+
+The output of a macro stays HTML, and the `{{ }}` inside the macro are escaped, so `{{ tuile(...) }}` works as before. Never put `|safe` on a value that comes straight from an entity: that is the case the escaping protects against.
 
 **Why are some of my tags or styles gone?** The body is sanitised. Scripts, `on*` attributes, external images, `@import`, external fonts and non-local `url()` are stripped on purpose.
 

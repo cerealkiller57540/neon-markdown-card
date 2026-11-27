@@ -1,4 +1,4 @@
-/* ── neon-markdown-card v4.17.2 ──
+/* ── neon-markdown-card v5.0.0 ──
  * Header néon (repris de neon-header-card-v2) + BODY full HTML/Markdown/Jinja.
  *
  *   type: custom:neon-markdown-card
@@ -165,9 +165,31 @@
  * ── v4.17.2 (22/11/2026) ──
  *   Éditeur : valeurs de config échappées dans value="…" et <textarea> (un corps contenant
  *   </textarea> ou une entité &lt; ne casse plus le formulaire ni ne se décode à la réouverture).
+ *
+ * ── v4.17.3 (23/11/2026) ──
+ *   history : option `step: true` (valeur tenue en marches, prolongée jusqu'à maintenant).
+ *
+ * ── v4.19.0 (23/11/2026) ──
+ *   data-step="<entity_id>|<delta>" : un tap règle un number/input_number de ±delta (set_value,
+ *   borné min/max, arrondi au pas de l'entité). Prioritaire sur data-toggle et data-entity.
+ * ── v4.18.0 (23/11/2026) ──
+ *   data-toggle="<entity_id>" : un tap appelle homeassistant.toggle (prioritaire sur data-entity).
+ *
+ * ── v4.19.1 (27/11/2026) ──
+ *   data-toggle / data-step passent enfin le sanitizer (ils étaient retirés : taps sans effet).
+ *   Un tap ne commande que des entités écrites en clair dans body.content (un id venu de l'état
+ *   d'une entité est ignoré) ; data-step limité à number/input_number.
+ *
+ * ── v5.0.0 (27/11/2026) ── CHANGEMENT CASSANT
+ *   {{ expr }} est échappé par défaut : un état, un attribut ou une variable qui contient du
+ *   HTML s'affiche en texte. Pour du HTML voulu : filtre |safe, ou une macro (sa sortie reste
+ *   du HTML, ses {{ }} internes restent échappés).
+ *   Le body nettoyé est inséré en nœuds DOM, sans re-sérialiser puis re-parser (mutation XSS).
+ *   <style>, <script> et <foreignObject> dans un SVG, et tout élément hors HTML/SVG (MathML),
+ *   sont retirés avec leur contenu au lieu d'être dépliés.
  */
 
-const NMC_VERSION = "4.17.2";
+const NMC_VERSION = "5.0.0";
 
 // Valeur de config remise dans le HTML de l'éditeur (attribut ou <textarea>) : échappée pour qu'elle ressorte à l'identique.
 function nmcEscAttr(v) { return String(v ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -276,8 +298,21 @@ function nmcLoadFont(family) {
  *  MOTEUR DE TEMPLATE — parseur séquentiel (compile → arbre → rend)
  * ════════════════════════════════════════════════════════════════ */
 
+// Sortie {{ }} échappée par défaut (comme l'autoescape de Jinja) : un état ou un attribut
+// d'entité ne doit jamais devenir du HTML. Restent bruts : la sortie d'une macro / d'un
+// {% call %} (HTML écrit par l'auteur du body) et le filtre explicite |safe.
+class NmcSafe {
+  constructor(s) { this.s = s; }
+  toString() { return this.s; }
+}
+function nmcEscOut(v) {
+  if (v instanceof NmcSafe) return v.s;
+  return nmcToStr(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
 function nmcToStr(v) {
   if (v == null) return "";
+  if (v instanceof NmcSafe) return v.s;
   if (typeof v === "object") return "";
   return String(v);
 }
@@ -339,7 +374,7 @@ function nmcCallMacro(name, def, argStr, hass, vars, callerDef) {
   child[NMC_MACRO_PREFIX + "caller"] = callerDef || undefined;
   // on reutilise le ctx du rendu en cours : la recursion est coupee par
   // NMC_MAX_TEMPLATE_DEPTH au lieu de figer le navigateur.
-  return nmcRenderNodes(def.body, hass, child, _nmcErrs, _nmcCtx);
+  return new NmcSafe(nmcRenderNodes(def.body, hass, child, _nmcErrs, _nmcCtx));
 }
 
 // "a, b='def'" -> [{name:'a', def:null}, {name:'b', def:"'def'"}]
@@ -508,7 +543,7 @@ function nmcRenderNodes(nodes, hass, vars, errs, ctx) {
       if (n.t === "expr") {
         try {
           const { expr, filters } = nmcSplitFilters(n.s);
-          append(nmcToStr(nmcApplyFilters(nmcEval(expr, hass, vars), filters, hass, vars)));
+          append(nmcEscOut(nmcApplyFilters(nmcEval(expr, hass, vars), filters, hass, vars)));
         } catch (e) {
           if (errs) errs.push(`{{ ${String(n.s).slice(0, 70)} }} → ${(e && e.message) || e}`);
         }
@@ -1107,6 +1142,7 @@ function nmcAtom(s, hass, vars) {
 }
 
 function nmcTruthy(v) {
+  if (v instanceof NmcSafe) v = v.s;
   if (v === false) return false;
   if (v === "" || v === 0 || v === "0" || v == null) return false;
   if (v === "off" || v === "false" || v === "unavailable" || v === "unknown" || v === "None")
@@ -1654,6 +1690,9 @@ function nmcApplyFilters(val, filterStr, hass, vars) {
       case "list":
         r = Array.isArray(r) ? r : r == null || r === "" ? [] : [r];
         break;
+      case "safe":
+        r = r instanceof NmcSafe ? r : new NmcSafe(nmcToStr(r));
+        break;
     }
   }
   return r;
@@ -1872,7 +1911,18 @@ const NMC_ALLOWED_TAGS = new Set([
   "TD",
   "TH",
 ]);
-const NMC_GLOBAL_ATTRS = new Set(["style", "class", "title", "aria-label", "role", "data-entity", "data-script"]);
+const NMC_GLOBAL_ATTRS = new Set(["style", "class", "title", "aria-label", "role", "data-entity", "data-script", "data-toggle", "data-step"]);
+// La vraie garde des commandes est _ctlInBody (id écrit en clair dans le body) ; ici, la forme.
+const NMC_DATA_TOGGLE_RE = /^[a-z_]+\.[a-z0-9_]+$/;
+const NMC_DATA_STEP_RE = /^(number|input_number)\.[a-z0-9_]+\|-?\d+(\.\d+)?$/;
+function nmcDataAttrOk(name, value) {
+  const v = value.trim();
+  if (name === "data-script") return /^script\.[a-z0-9_]+$/.test(v);
+  if (name === "data-entity") return /^[a-z_]+\.[a-zA-Z0-9_]+$/.test(v);
+  if (name === "data-toggle") return NMC_DATA_TOGGLE_RE.test(v);
+  if (name === "data-step") return NMC_DATA_STEP_RE.test(v);
+  return true;
+}
 const NMC_TAG_ATTRS = {
   A: new Set(["href"]),
   IMG: new Set(["src", "alt", "width", "height", "loading"]),
@@ -1951,6 +2001,8 @@ const NMC_ALLOWED_SVG_ATTRS = new Set([
   "id",
   "data-entity",
   "data-script",
+  "data-toggle",
+  "data-step",
   // v4.1 : attributs SMIL (+ pathLength pour normaliser les dash à 100)
   "pathlength",
   "attributename",
@@ -2064,19 +2116,30 @@ function nmcMorphChildren(from, to) {
   }
 }
 
+const NMC_NS_HTML = "http://www.w3.org/1999/xhtml",
+  NMC_NS_SVG = "http://www.w3.org/2000/svg";
+// Rend un DocumentFragment inséré tel quel : sérialiser puis re-parser l'arbre nettoyé
+// permettait une mutation XSS (le second parse ne donne pas le même arbre).
 function nmcSanitizeBody(raw) {
-  if (raw == null) return "";
-  let html = String(raw).replace(/\[mdi:([a-zA-Z0-9_-]+)\]/g, '<ha-icon icon="mdi:$1"></ha-icon>');
-  if (!html.includes("<")) return html;
+  const html = String(raw ?? "").replace(/\[mdi:([a-zA-Z0-9_-]+)\]/g, '<ha-icon icon="mdi:$1"></ha-icon>');
   const tpl = document.createElement("template");
   tpl.innerHTML = html;
   const walker = document.createTreeWalker(tpl.content, NodeFilter.SHOW_ELEMENT);
   const nodes = [];
   while (walker.nextNode()) nodes.push(walker.currentNode);
   nodes.forEach((el) => {
+    if (!el.isConnected && !tpl.content.contains(el)) return; // sous-arbre déjà retiré
     const tn = el.tagName,
-      tnLower = tn.toLowerCase();
-    // <style> : conserver uniquement les @keyframes sûrs (déclaration d'animations custom)
+      tnLower = tn.toLowerCase(),
+      ns = el.namespaceURI;
+    // Hors HTML/SVG (MathML…), <style>/<script> SVG, foreignObject : retirés AVEC leur contenu
+    // (déplier ferait passer du HTML dans le SVG ou du texte CSS en contenu).
+    if ((ns !== NMC_NS_HTML && ns !== NMC_NS_SVG) ||
+        (ns === NMC_NS_SVG && (tnLower === "style" || tnLower === "script" || tnLower === "foreignobject"))) {
+      el.remove();
+      return;
+    }
+    // <style> HTML : conserver uniquement les @keyframes sûrs (déclaration d'animations custom)
     if (tn === "STYLE") {
       // v4.0 : CSS complet conservé (classes, @container, @media…) — le shadow DOM de la
       // card le scope. Fallback keyframes-only si motif dangereux détecté.
@@ -2089,8 +2152,8 @@ function nmcSanitizeBody(raw) {
       }
       return;
     }
-    const isSvg = NMC_ALLOWED_SVG_TAGS.has(tnLower);
-    if (!NMC_ALLOWED_TAGS.has(tn) && !isSvg) {
+    const isSvg = ns === NMC_NS_SVG && NMC_ALLOWED_SVG_TAGS.has(tnLower);
+    if (!isSvg && (ns !== NMC_NS_HTML || !NMC_ALLOWED_TAGS.has(tn))) {
       const parent = el.parentNode;
       if (parent) {
         while (el.firstChild) parent.insertBefore(el.firstChild, el);
@@ -2143,11 +2206,7 @@ function nmcSanitizeBody(raw) {
             return;
           }
         }
-        if (an === "data-script" && !/^script\.[a-z0-9_]+$/.test(a.value.trim())) {
-          el.removeAttribute(a.name);
-          return;
-        }
-        if (an === "data-entity" && !/^[a-z_]+\.[a-zA-Z0-9_]+$/.test(a.value.trim())) {
+        if (!nmcDataAttrOk(an, a.value)) {
           el.removeAttribute(a.name);
           return;
         }
@@ -2174,11 +2233,7 @@ function nmcSanitizeBody(raw) {
         el.removeAttribute(a.name);
         return;
       }
-      if (name === "data-script" && !/^script\.[a-z0-9_]+$/.test(a.value.trim())) {
-        el.removeAttribute(a.name);
-        return;
-      }
-      if (name === "data-entity" && !/^[a-z_]+\.[a-zA-Z0-9_]+$/.test(a.value.trim())) {
+      if (!nmcDataAttrOk(name, a.value)) {
         el.removeAttribute(a.name);
         return;
       }
@@ -2220,7 +2275,12 @@ function nmcSanitizeBody(raw) {
       }
     }
   });
-  return tpl.innerHTML;
+  return tpl.content;
+}
+function nmcSanitizeBodyHTML(raw) {
+  const t = document.createElement("template");
+  t.content.appendChild(nmcSanitizeBody(raw));
+  return t.innerHTML;
 }
 
 // ── config normalizer ────────────────────────────────────────────
@@ -2280,7 +2340,7 @@ function nmcBuildConfig(raw) {
   const history = Array.isArray(r.history)
     ? r.history
         .filter((h) => h && typeof h.entity === "string")
-        .map((h) => ({ entity: h.entity, hours: parseFloat(h.hours) || 24 }))
+        .map((h) => ({ entity: h.entity, hours: parseFloat(h.hours) || 24, step: !!h.step }))
     : [];
   return { mode, title, body, shared, debug, history };
 }
@@ -2907,22 +2967,24 @@ class NeonMarkdownCard extends HTMLElement {
         let rendered =
           nmcParseTemplate(this._hass, c.body.content, { hist: this._histVars || {} }, errs) || "";
         if (c.body.format === "markdown") rendered = nmcMarkdown(rendered);
-        let html = nmcSanitizeBody(rendered);
+        const frag = nmcSanitizeBody(rendered);
         if (errs && errs.length) {
-          const esc = (x) => String(x).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
           const uniq = [...new Set(errs)].slice(0, 12);
-          html +=
-            '<div style="margin-top:8px;padding:6px 8px;border:1px solid rgba(255,59,48,.6);background:rgba(255,59,48,.08);font-family:monospace;font-size:11px;line-height:1.5;color:#FF6B61;">⚠ nmc debug — ' +
-            uniq.length +
-            " " + _t('erreur(s)') + "<br>" +
-            uniq.map(esc).join("<br>") +
-            "</div>";
+          const box = document.createElement("div");
+          box.setAttribute("style", "margin-top:8px;padding:6px 8px;border:1px solid rgba(255,59,48,.6);background:rgba(255,59,48,.08);font-family:monospace;font-size:11px;line-height:1.5;color:#FF6B61;");
+          box.appendChild(document.createTextNode("⚠ nmc debug — " + uniq.length + " " + _t('erreur(s)')));
+          for (const m of uniq) {
+            box.appendChild(document.createElement("br"));
+            box.appendChild(document.createTextNode(String(m)));
+          }
+          frag.appendChild(box);
         }
-        if (el.innerHTML !== html) {
+        // Sérialiser sert seulement à comparer : on insère le fragment nettoyé, jamais un re-parse.
+        const cmp = document.createElement("template");
+        cmp.content.appendChild(frag.cloneNode(true));
+        if (el.innerHTML !== cmp.innerHTML) {
           // morph partiel au lieu d'un remplacement innerHTML : les éléments animés survivent
-          const tpl = document.createElement("template");
-          tpl.innerHTML = html;
-          nmcMorphChildren(el, tpl.content);
+          nmcMorphChildren(el, frag);
         }
       }
     }
@@ -2956,6 +3018,17 @@ class NeonMarkdownCard extends HTMLElement {
             pts = pts.filter((_, idx) => idx % stride === 0);
           }
           if (!pts.length) return;
+          // step : valeur tenue jusqu'au changement suivant (registre, consigne) au lieu d'une
+          // interpolation entre deux états, et prolongée jusqu'à maintenant (pas d'état émis
+          // tant que la valeur ne bouge pas).
+          if (hc.step) {
+            const st = [pts[0]];
+            for (let i = 1; i < pts.length; i++) {
+              st.push({ v: pts[i - 1].v, t: pts[i].t }, pts[i]);
+            }
+            st.push({ v: pts[pts.length - 1].v, t: t1 });
+            pts = st;
+          }
           let mn = Infinity,
             mx = -Infinity;
           for (const p of pts) {
@@ -3137,7 +3210,7 @@ class NeonMarkdownCard extends HTMLElement {
         .nmc-body ::-webkit-scrollbar-thumb:hover { background:#FF2D6B; }
         /* tuiles interactives : hover desktop (lève + éclaircit), inerte au tactile */
         .nmc-body .nmc-tile { transition:transform .15s ease, filter .15s ease; }
-        .nmc-body [data-entity], .nmc-body [data-script] { cursor:pointer; }
+        .nmc-body [data-entity], .nmc-body [data-script], .nmc-body [data-toggle], .nmc-body [data-step] { cursor:pointer; }
         @media (hover:hover) { .nmc-body .nmc-tile:hover { transform:translateY(-2px) scale(1.02); filter:brightness(1.18); } }
         /* low-power (iPad/mobile/app Companion) : coupe les BALAYAGES continus coûteux
            injectés par un body markdown (scanlines, data-flow, shimmer, pulse-travel).
@@ -3199,6 +3272,15 @@ class NeonMarkdownCard extends HTMLElement {
     this._rendered = true;
   }
 
+  // Un tap ne commande que des entités écrites en clair dans le body rédigé par l'auteur :
+  // un id injecté par l'état d'une entité (input_text, MQTT) n'y figure pas.
+  _ctlInBody(eid) {
+    const src = this._config?.body?.content;
+    if (typeof src !== "string" || !eid) return false;
+    const esc = eid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp("(^|[^a-z0-9_.])" + esc + "(?![a-z0-9_])").test(src);
+  }
+
   _reattach(card) {
     if (!card) return;
     if (!this._ro && window.ResizeObserver) {
@@ -3217,8 +3299,9 @@ class NeonMarkdownCard extends HTMLElement {
     if (!this._ac) {
       this._ac = new AbortController();
 
-      // 0. data-script="script.x" (v4.12) : tap → script.turn_on ; data-entity="…" (v4.0) : tap → more-info.
-      //    Tous deux prioritaires sur le tap_action global.
+      // 0. data-script="script.x" (v4.12) : tap → script.turn_on ; data-toggle="…" (v4.18) : tap →
+      //    homeassistant.toggle ; data-entity="…" (v4.0) : tap → more-info.
+      //    Tous prioritaires sur le tap_action global.
       card.addEventListener(
         "click",
         (e) => {
@@ -3227,6 +3310,37 @@ class NeonMarkdownCard extends HTMLElement {
             e.stopImmediatePropagation();
             e.preventDefault();
             this._hass?.callService("script", "turn_on", { entity_id: run.getAttribute("data-script") });
+            return;
+          }
+          // data-step="<entity_id>|<delta>" : tap → set_value(valeur + delta), borné aux attributs
+          // min/max de l'entité et arrondi à son pas (les flottants accumulent 0.1+0.2).
+          const stp = e.target && e.target.closest ? e.target.closest("[data-step]") : null;
+          if (stp) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            const [eid, d] = stp.getAttribute("data-step").split("|");
+            if (!this._ctlInBody(eid)) return;
+            const st = this._hass?.states?.[eid];
+            const cur = parseFloat(st?.state);
+            const delta = parseFloat(d);
+            if (st && Number.isFinite(cur) && Number.isFinite(delta)) {
+              const a = st.attributes || {};
+              const step = parseFloat(a.step) || Math.abs(delta) || 1;
+              let v = Math.round((cur + delta) / step) * step;
+              if (Number.isFinite(parseFloat(a.min))) v = Math.max(parseFloat(a.min), v);
+              if (Number.isFinite(parseFloat(a.max))) v = Math.min(parseFloat(a.max), v);
+              const dec = (String(step).split(".")[1] || "").length;
+              v = parseFloat(v.toFixed(dec));
+              if (v !== cur) this._hass.callService(eid.split(".")[0], "set_value", { entity_id: eid, value: v });
+            }
+            return;
+          }
+          const tog = e.target && e.target.closest ? e.target.closest("[data-toggle]") : null;
+          if (tog) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            const eid = tog.getAttribute("data-toggle");
+            if (this._ctlInBody(eid)) this._hass?.callService("homeassistant", "toggle", { entity_id: eid });
             return;
           }
           const hit = e.target && e.target.closest ? e.target.closest("[data-entity]") : null;
@@ -3299,7 +3413,8 @@ customElements.define("neon-markdown-card", NeonMarkdownCard);
 const NMC_TEST_API = {
   nmcSafeHref,
   nmcSafeSrc,
-  nmcSanitizeBody,
+  nmcSanitizeBody: nmcSanitizeBodyHTML,
+  nmcSanitizeBodyFragment: nmcSanitizeBody,
   nmcMarkdown,
   nmcApplyFilters,
   nmcParseTemplate,
