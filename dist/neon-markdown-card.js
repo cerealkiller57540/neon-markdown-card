@@ -1,4 +1,4 @@
-/* ── neon-markdown-card v5.0.0 ──
+/* ── neon-markdown-card v5.0.1 ──
  * Header néon (repris de neon-header-card-v2) + BODY full HTML/Markdown/Jinja.
  *
  *   type: custom:neon-markdown-card
@@ -187,9 +187,13 @@
  *   Le body nettoyé est inséré en nœuds DOM, sans re-sérialiser puis re-parser (mutation XSS).
  *   <style>, <script> et <foreignObject> dans un SVG, et tout élément hors HTML/SVG (MathML),
  *   sont retirés avec leur contenu au lieu d'être dépliés.
+ *
+ * ── v5.0.1 (27/11/2026) ──
+ *   Titre rendu sans échappement (il est posé par textContent) : « Tom & Jerry » ou une
+ *   apostrophe ne s'affichent plus en &amp; / &#39; dans le header.
  */
 
-const NMC_VERSION = "5.0.0";
+const NMC_VERSION = "5.0.1";
 
 // Valeur de config remise dans le HTML de l'éditeur (attribut ou <textarea>) : échappée pour qu'elle ressorte à l'identique.
 function nmcEscAttr(v) { return String(v ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -305,8 +309,11 @@ class NmcSafe {
   constructor(s) { this.s = s; }
   toString() { return this.s; }
 }
+// Titre : posé par textContent, qui ne crée jamais de balise ; l'échapper afficherait &amp;.
+let _nmcRawOut = false;
 function nmcEscOut(v) {
   if (v instanceof NmcSafe) return v.s;
+  if (_nmcRawOut) return nmcToStr(v);
   return nmcToStr(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
@@ -667,6 +674,13 @@ function nmcParseTemplate(hass, text, vars, errs) {
     _nmcCache.set(text, nodes);
   }
   return nmcRenderNodes(nodes, hass, vars, errs).trim();
+}
+
+function nmcParseTemplateText(hass, text, vars, errs) {
+  const prev = _nmcRawOut;
+  _nmcRawOut = true;
+  try { return nmcParseTemplate(hass, text, vars, errs); }
+  finally { _nmcRawOut = prev; }
 }
 
 function nmcSplitFilters(s) {
@@ -2959,7 +2973,7 @@ class NeonMarkdownCard extends HTMLElement {
       const el = this.shadowRoot.querySelector(".nmc-title");
       if (el)
         el.textContent =
-          nmcParseTemplate(this._hass, c.title.text, { hist: this._histVars || {} }, errs) || "";
+          nmcParseTemplateText(this._hass, c.title.text, { hist: this._histVars || {} }, errs) || "";
     }
     if (mode === "body" || mode === "both") {
       const el = this.shadowRoot.querySelector(".nmc-body");
@@ -3418,6 +3432,7 @@ const NMC_TEST_API = {
   nmcMarkdown,
   nmcApplyFilters,
   nmcParseTemplate,
+  nmcParseTemplateText,
   nmcCollectDependencies,
   nmcDependenciesChanged,
   NeonMarkdownCard,
