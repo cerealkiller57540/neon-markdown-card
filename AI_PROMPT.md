@@ -2,15 +2,15 @@
 
 Asking ChatGPT, Claude, Gemini or any other assistant to write a `neon-markdown-card`? Paste the prompt below first, then describe the card you want and list your entity ids.
 
-**Why this is needed:** the card does not use Home Assistant's Jinja. It runs its own lighter engine in the browser, and an assistant trained on HA templates will write code that works in *Developer tools → Template* but renders wrong here, often without an error. The rules below were each measured on the engine of version 5.0.1, not guessed.
+**Why it helps:** the card renders its templates directly in your browser, with its own compact Jinja engine. That is what makes it instant: no round trip to the server, updates as soon as a state changes. Assistants, though, have learned Home Assistant's server-side Jinja, which offers a few extras this engine does without. The prompt tells them which style to write in, so the card works on the first try. Every rule in it was checked on version 5.0.1.
 
 Fill in the two lines at the end (`MY CARD`, `MY ENTITIES`), then send it.
 
 ~~~~markdown
 You are writing a Home Assistant Lovelace card of type `custom:neon-markdown-card` (v5.x).
-Its body is HTML + inline CSS + SVG, templated with a CUSTOM JavaScript Jinja engine that
-runs in the browser. It is NOT Home Assistant's Jinja2: many things that work in HA's
-template editor break here, usually silently. Follow these rules strictly.
+Its body is HTML + inline CSS + SVG, templated with the card's own Jinja engine, which runs in the browser
+for instant rendering. It covers the common Jinja subset, with a few differences from Home
+Assistant's server-side Jinja2. Write in the style below and the card renders first time.
 
 ## Output format
 Return ONE complete YAML card, nothing else, in this shape:
@@ -41,11 +41,10 @@ history:              # optional, only if a sparkline/trend is needed
   your own `@keyframes` in a `<style>` block.
 
 ## The golden rule: compute in `{% set %}`, print simple variables
-The arithmetic parser is fragile as soon as a filter or a function call sits inside a larger
-expression. Put every entity read and every filter in its own `{% set %}`, then do maths only
-between plain variables.
+Arithmetic is evaluated between plain values. Put every entity read and every filter in its
+own `{% set %}`, then do maths between those variables. It also keeps templates readable.
 
-WRONG (silently prints the first value only):
+WRONG (prints the first value only):
   {{ states('sensor.a')|float(0) + states('sensor.b')|float(0) }}
   {{ states('sensor.p')|float(0) * 1000 }}
 RIGHT:
@@ -53,7 +52,7 @@ RIGHT:
   {{ a + b }}
   {% set p = states('sensor.p')|float(0) %}{{ p * 1000 }}
 
-Also printed as raw text, not evaluated:
+Same rule, these are printed as text: give them a `{% set %}` first.
 - Parentheses around a filtered expression: `{{ (states('x')|float(0)) * 2 }}`.
 - A conditional expression inside arithmetic: `{{ b + (2 if c else 0) }}`
   → `{% set extra = 2 if c else 0 %}{{ b + extra }}`.
@@ -64,8 +63,8 @@ Also printed as raw text, not evaluated:
   `{{ [a, b]|max }}` and `{{ [a, b]|min }}` work directly.
 
 Parentheses between plain variables are fine: `{{ (a + b) * 2 }}`.
-Supported operators: `+ - * / ** %` and comparisons. `//` is BROKEN (returns 0):
-use `{{ (a / b)|int }}`.
+Supported operators: `+ - * / ** %` and comparisons. For integer division write
+`{{ (a / b)|int }}` (`//` is not supported).
 
 ## Conditionals and booleans
 - Booleans print as `1` / `0`, never `True` / `False`. Use them in `{% if %}`, not as text.
@@ -75,28 +74,27 @@ use `{{ (a / b)|int }}`.
 - `{% set %}` inside an `{% if %}` or `{% for %}` LEAKS OUT of the block (unlike Jinja).
   Inside a `{% for %}`, a running total does NOT accumulate: use filters (see Lists).
 
-## Undefined names: the dangerous one
+## Always set a variable before using it
 An undefined variable renders as ITS OWN NAME: `{{ zz }}` prints `zz`. Therefore:
 - `zz is defined` is TRUE for an undefined variable, and `is not defined` is false.
 - `zz|default('x')` prints `zz`.
-So never rely on `is defined` / `default` for a plain variable: always `{% set %}` it first.
+So give every variable a value with `{% set %}` before testing it.
 They DO work on lookups: `hist['sensor.x'] is defined`, `state_attr(e, 'a') is none`,
 `state_attr(e, 'a')|default('—')`. For entity states use `|float(0)` / `|int(0)`, which
 handle `unavailable` and `unknown`.
 
 ## Lists and dicts
-- You can NOT build a list: `l + [x]` and `l.append(x)` both fail. Write literal lists.
+- Lists are written literally (`['a', 'b']`); `l + [x]` and `l.append(x)` are not supported.
 - `{% for a, b in pairs %}` does not unpack: use `{% for r in pairs %}{{ r[0] }}{{ r[1] }}`.
-- You can NOT loop over a dict (`for k in d`, `d.items()`, `d.keys()`, `|dictsort` fail).
-  Use a list of dicts instead: `{% for r in [{'n': 'Kitchen', 'e': 'light.kitchen'}] %}`
+- Loops run over lists. For key/value data, use a list of dicts: `{% for r in [{'n': 'Kitchen', 'e': 'light.kitchen'}] %}`
   then `r.n`, `states(r.e)`.
 - A trailing comma in a literal list is OK.
-- Counting entities in a state: `select('eq', ...)` and `select('is_state', ...)` IGNORE
-  their test (they return the whole list), and `states.light` is empty. The reliable way:
+- Counting entities in a state: use `expand` + `selectattr` (`select(...)` with a test and
+  `states.light` iteration are not supported):
   `{{ expand(['light.a', 'light.b'])|selectattr('state', 'eq', 'on')|list|length }}`.
 - Works: `|selectattr(attr, 'eq', v)`, `|map(attribute='x')`, `|sum`, `|join(', ')`,
   `|length`, `|first`, `|last`, `|list`, `d.get('k', default)`, `'b' in ['a', 'b']`.
-- Does NOT work: negative indexes (`l[-1]` → use `|last`), slicing (`s[0:3]`),
+- Not supported: negative indexes (`l[-1]` → use `|last`), slicing (`s[0:3]`),
   `namespace()`.
 
 ## Filters and functions
@@ -104,7 +102,7 @@ Works: `float(d)`, `int(d)`, `round(n)` (pads zeros: `1.4|round(2)` → `1.40`),
 `upper`, `lower`, `title`, `replace`, `truncate`, `format` (`'%.1f'|format(x)`), `safe`,
 `as_timestamp(...)`, `now()`, `relative_time(...)`, `expand(...)`, `states.sensor.x.state`,
 `~` for string concatenation.
-Does NOT work: `timestamp_custom` (returns the raw number), whitespace control `{%- -%}` /
+Not supported: `timestamp_custom` (returns the raw number), whitespace control `{%- -%}` /
 `{{- -}}` (the dashes are printed), negative indexes, slicing.
 Macros: `{% macro name(a, b='x') %}` with keyword arguments works, and so does
 `{% call %}` / `caller()`. A macro named like a built-in function (`round`, `max`...) is ignored: pick another name.
@@ -117,7 +115,7 @@ Built-in macros: `fmt_eta`, `tuile`, `spark`, `hp_style` (a macro of yours with 
 `|safe` is allowed only on a string you built yourself from constants and numbers, never on
 a raw entity value or attribute.
 
-## Sanitizer (removed from the output, on purpose)
+## Sanitizer (keeps the card safe, removes on purpose)
 `<script>`, `on*` attributes (`onclick`...), `id` attributes, external images and URLs,
 `@import`, external fonts, non-local `url()`. Use classes, not ids. Use inline SVG for graphics.
 
