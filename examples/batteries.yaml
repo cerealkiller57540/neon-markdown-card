@@ -1,0 +1,41 @@
+# Neon Markdown Card example: batteries
+# Replace these entity ids with yours:
+#   sensor.home_battery
+#   sensor.phone_battery_level
+#   sensor.tablet_battery_level
+#   sensor.remote_battery
+type: custom:neon-markdown-card
+mode: both
+title:
+  text: BATTERIES
+  icon: mdi:battery-high
+  glow: true
+  gradient: true
+history:
+  - entity: sensor.home_battery
+    hours: 24
+body:
+  format: html
+  content: |-
+    <style>
+      .row { display:flex; justify-content:space-between; padding:4px 0; }
+      .low { color:#ff2d6b; animation: nmc-flicker 2s infinite; }
+    </style>
+    {% set devices = [
+      {'n':'Phone',  'e':'sensor.phone_battery_level'},
+      {'n':'Tablet', 'e':'sensor.tablet_battery_level'},
+      {'n':'Remote', 'e':'sensor.remote_battery'}
+    ] %}
+    {% for d in devices|sort(attribute='n') %}
+      {% set v = states(d.e)|int(0) %}
+      <div class="row" data-entity="{{ d.e }}">
+        <span>{{ loop.index }}. {{ d.n }}</span>
+        <b class="{{ 'low' if v < 20 else '' }}">{{ v }} %</b>
+      </div>
+    {% endfor %}
+    {% if hist['sensor.home_battery'] is defined %}
+    <svg viewBox="0 0 100 30" preserveAspectRatio="none" style="width:100%;height:40px">
+      <polyline points="{{ hist['sensor.home_battery'].pts }}" fill="none" stroke="#00f0ff"
+                vector-effect="non-scaling-stroke"/>
+    </svg>
+    {% endif %}

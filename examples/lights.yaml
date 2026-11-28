@@ -1,0 +1,42 @@
+# Neon Markdown Card example: lights
+# Replace these entity ids with yours:
+#   light.living_room
+#   light.kitchen
+#   light.dining_table
+#   light.bedroom
+#   light.desk
+#   light.tv_strip
+type: custom:neon-markdown-card
+title:
+  text: Lights
+  icon: mdi:lightbulb-group
+  icon_color: "#ffb340"
+  color: "var(--primary-text-color)"
+  font_size: "18px"
+  font_weight: "500"
+body:
+  content: |-
+    <style>.lbl{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--secondary-text-color)}
+    .g{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+    .l{border-radius:10px;padding:12px 10px;border:1px solid rgba(255,255,255,.07);background:rgba(255,255,255,.02);cursor:pointer;transition:all .2s}
+    .l ha-icon{--mdc-icon-size:26px;color:#5b6273}
+    .l .n{font-size:13px;margin-top:8px}
+    .l .p{font-size:11px;color:var(--secondary-text-color);margin-top:2px}
+    .l.on{border-color:rgba(255,179,64,.45);background:linear-gradient(160deg,rgba(255,179,64,.16),rgba(255,179,64,.02))}
+    .l.on ha-icon{color:#ffb340;filter:drop-shadow(0 0 6px rgba(255,179,64,.8))}
+    .sum{margin-top:12px}
+    </style>
+    {% set lights = [
+     {'e':'light.living_room','n':'Living room','i':'ceiling-light'},
+     {'e':'light.kitchen','n':'Kitchen','i':'ceiling-light'},
+     {'e':'light.dining_table','n':'Dining','i':'lightbulb-outline'},
+     {'e':'light.bedroom','n':'Bedroom','i':'floor-lamp'},
+     {'e':'light.desk','n':'Desk','i':'desk-lamp'},
+     {'e':'light.tv_strip','n':'TV strip','i':'led-strip-variant'}
+    ] %}
+    <div class="g">{% for l in lights %}{% set on = states(l.e) == 'on' %}
+    {% set b = state_attr(l.e,'brightness')|int(0) %}
+    <div class="l {{ 'on' if on else '' }}" data-toggle="{{ l.e }}"><ha-icon icon="mdi:{{ l.i }}"></ha-icon>
+    <div class="n">{{ l.n }}</div><div class="p">{{ ((b * 100 / 255)|round(0)|int ~ ' %') if on else 'Off' }}</div></div>
+    {% endfor %}</div>
+    <div class="lbl sum">{{ lights|length }} lights · tap a tile to toggle</div>

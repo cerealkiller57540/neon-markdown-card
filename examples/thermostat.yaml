@@ -1,0 +1,43 @@
+# Neon Markdown Card example: thermostat
+# Replace these entity ids with yours:
+#   sensor.living_room_temperature
+#   sensor.living_room_humidity
+#   input_number.living_room_target
+#   climate.living_room
+type: custom:neon-markdown-card
+title:
+  text: Living room
+  icon: mdi:thermostat
+  icon_color: "#ff6a3d"
+  color: "var(--primary-text-color)"
+  font_size: "18px"
+  font_weight: "500"
+body:
+  content: |-
+    <style>.lbl{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--secondary-text-color)}
+    .th{display:flex;align-items:center;gap:18px}
+    .ring{position:relative;width:132px;height:132px;flex:none}
+    .ring svg{width:100%;height:100%;transform:rotate(135deg)}
+    .ring .c{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+    .ring b{font-size:34px;font-weight:300;line-height:1}
+    .ring span{font-size:11px;color:#ff6a3d;letter-spacing:.12em;margin-top:4px}
+    .side{flex:1}
+    .set{display:flex;align-items:center;justify-content:space-between;margin:6px 0 14px}
+    .btn{width:34px;height:34px;border-radius:50%;border:1px solid rgba(255,106,61,.45);display:flex;align-items:center;justify-content:center;color:#ff6a3d;cursor:pointer}
+    .tg{font-size:24px}
+    .hm{display:flex;align-items:center;gap:6px;font-size:14px}
+    .hm ha-icon{--mdc-icon-size:18px;color:#00e8ff}
+    </style>
+    {% set cur = states('sensor.living_room_temperature')|float(0) %}
+    {% set tgt = states('input_number.living_room_target')|float(0) %}
+    {% set pct = (cur - 15) / 10 %}
+    {% set heating = state_attr('climate.living_room','hvac_action') == 'heating' %}
+    <div class="th"><div class="ring" data-entity="climate.living_room">
+    <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="42" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="7" stroke-dasharray="198 264" stroke-linecap="round"/>
+    <circle cx="50" cy="50" r="42" fill="none" stroke="#ff6a3d" stroke-width="7" stroke-linecap="round" stroke-dasharray="{{ (pct * 198)|round(1) }} 264" style="filter:drop-shadow(0 0 4px #ff6a3d)"/></svg>
+    <div class="c"><b>{{ cur }}°</b><span>{{ 'HEATING' if heating else 'IDLE' }}</span></div></div>
+    <div class="side"><div class="lbl">Target</div>
+    <div class="set"><div class="btn" data-step="input_number.living_room_target|-0.5"><ha-icon icon="mdi:minus"></ha-icon></div>
+    <div class="tg">{{ tgt }}°</div>
+    <div class="btn" data-step="input_number.living_room_target|0.5"><ha-icon icon="mdi:plus"></ha-icon></div></div>
+    <div class="lbl">Humidity</div><div class="hm"><ha-icon icon="mdi:water-percent"></ha-icon>{{ states('sensor.living_room_humidity') }} %</div></div></div>

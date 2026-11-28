@@ -1,0 +1,51 @@
+# Neon Markdown Card example: energy
+# Replace these entity ids with yours:
+#   sensor.solar_power
+#   sensor.grid_power
+#   sensor.home_power
+#   sensor.home_battery
+#   sensor.solar_energy_today
+type: custom:neon-markdown-card
+title:
+  text: ENERGY
+  icon: mdi:solar-power
+  glow: true
+  gradient: true
+  gradient_from: "#ffd000"
+  gradient_to: "#00ff9c"
+  icon_color: "#ffd000"
+  glow_color: "#ffd000"
+history:
+  - entity: sensor.solar_power
+    hours: 24
+body:
+  content: |-
+    <style>.lbl{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--secondary-text-color)}
+    .r{display:grid;grid-template-columns:26px 1fr auto;align-items:center;gap:10px;margin:9px 0}
+    .r ha-icon{--mdc-icon-size:22px}
+    .bar{height:6px;border-radius:3px;background:rgba(255,255,255,.06);overflow:hidden;margin-top:5px}
+    .bar i{display:block;height:100%;border-radius:3px}
+    .v{font-size:18px;font-weight:500;text-align:right;min-width:70px}
+    .v small{font-size:11px;color:var(--secondary-text-color);font-weight:400}
+    .ft{display:flex;justify-content:space-between;margin-top:12px}
+    </style>
+    {% set sol = states('sensor.solar_power')|float(0) %}
+    {% set home = states('sensor.home_power')|float(0) %}
+    {% set grid = states('sensor.grid_power')|float(0) %}
+    {% set bat = states('sensor.home_battery')|int(0) %}
+    {% set gabs = grid if grid > 0 else 0 - grid %}
+    {% set rows = [
+     {'n':'Solar','e':'sensor.solar_power','v':sol,'c':'#ffd000','i':'solar-power'},
+     {'n':'Home','e':'sensor.home_power','v':home,'c':'#00e8ff','i':'home-lightning-bolt'},
+     {'n':('Export' if grid < 0 else 'Import'),'e':'sensor.grid_power','v':gabs,'c':('#00ff9c' if grid < 0 else '#ff2d6b'),'i':'transmission-tower'}
+    ] %}
+    {% for r in rows %}<div class="r" data-entity="{{ r.e }}"><ha-icon icon="mdi:{{ r.i }}" style="color:{{ r.c }}"></ha-icon>
+    <div><span class="lbl">{{ r.n }}</span><div class="bar"><i style="width:{{ [r.v / 40, 100]|min }}%;background:{{ r.c }};box-shadow:0 0 8px {{ r.c }}"></i></div></div>
+    <div class="v">{{ r.v|round(0)|int }}<small> W</small></div></div>{% endfor %}
+    <div class="r" data-entity="sensor.home_battery"><ha-icon icon="mdi:home-battery" style="color:#b44dff"></ha-icon>
+    <div><span class="lbl">Battery · charging</span><div class="bar"><i style="width:{{ bat }}%;background:#b44dff;box-shadow:0 0 8px #b44dff"></i></div></div>
+    <div class="v">{{ bat }}<small> %</small></div></div>
+    {% if hist['sensor.solar_power'] is defined %}
+    <svg viewBox="0 0 100 30" preserveAspectRatio="none" style="width:100%;height:40px;margin-top:8px">
+    <polyline points="{{ hist['sensor.solar_power'].pts }}" fill="none" stroke="#ffd000" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>{% endif %}
+    <div class="ft"><span class="lbl">Solar · last 24 h</span><span class="lbl">Today {{ states('sensor.solar_energy_today') }} kWh</span></div>

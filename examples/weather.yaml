@@ -1,0 +1,46 @@
+# Neon Markdown Card example: weather
+# Replace these entity ids with yours:
+#   weather.home
+#   sensor.outdoor_temperature
+#   sensor.outdoor_humidity
+#   sensor.wind_speed
+#   sensor.pressure
+type: custom:neon-markdown-card
+title:
+  text: WEATHER
+  icon: mdi:weather-partly-cloudy
+  glow: true
+  gradient: true
+  gradient_from: "#00e8ff"
+  gradient_to: "#ff50a0"
+history:
+  - entity: sensor.outdoor_temperature
+    hours: 24
+body:
+  content: |-
+    <style>.lbl{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--secondary-text-color)}
+    .now{display:flex;align-items:center;gap:16px}
+    .now .ic ha-icon{--mdc-icon-size:52px;color:#00e8ff;filter:drop-shadow(0 0 8px rgba(0,232,255,.5))}
+    .t{font-size:46px;font-weight:300;line-height:1}
+    .t small{font-size:18px;color:var(--secondary-text-color)}
+    .cond{color:#00e8ff;font-size:12px;letter-spacing:.12em;text-transform:uppercase;margin-top:4px}
+    .kv{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:16px 0 12px}
+    .kv div{border:1px solid rgba(0,232,255,.16);border-radius:8px;padding:8px 6px;text-align:center;background:rgba(0,232,255,.03)}
+    .kv b{display:block;font-size:17px;font-weight:500;margin-top:2px}
+    </style>
+    {% set t = states('sensor.outdoor_temperature')|float(0) %}
+    {% set c = states('weather.home') %}
+    <div class="now"><span class="ic">[mdi:weather-partly-cloudy]</span>
+    <div><div class="t">{{ t|round(1) }}<small> °C</small></div>
+    <div class="cond">{{ 'Partly cloudy' if c == 'partlycloudy' else c }}</div></div></div>
+    <div class="kv">
+    <div data-entity="sensor.outdoor_humidity"><span class="lbl">Humidity</span><b>{{ states('sensor.outdoor_humidity') }} %</b></div>
+    <div data-entity="sensor.wind_speed"><span class="lbl">Wind</span><b>{{ states('sensor.wind_speed') }} km/h</b></div>
+    <div data-entity="sensor.pressure"><span class="lbl">Pressure</span><b>{{ states('sensor.pressure') }}</b></div>
+    </div>
+    {% if hist['sensor.outdoor_temperature'] is defined %}{% set h = hist['sensor.outdoor_temperature'] %}
+    <div class="lbl">Last 24 h · min {{ h.min|round(1) }} · max {{ h.max|round(1) }} °C</div>
+    <svg viewBox="0 0 100 30" preserveAspectRatio="none" style="width:100%;height:46px;margin-top:6px">
+    <defs><linearGradient id="wg" x1="0" x2="1"><stop offset="0" stop-color="#00e8ff"/><stop offset="1" stop-color="#ff50a0"/></linearGradient></defs>
+    <polyline points="{{ h.pts }}" fill="none" stroke="url(#wg)" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>
+    {% endif %}

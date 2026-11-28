@@ -11,17 +11,13 @@
 
 [![Open your Home Assistant instance and open this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=cerealkiller57540&repository=neon-markdown-card&category=plugin)
 
-<img src="https://raw.githubusercontent.com/cerealkiller57540/neon-markdown-card/main/images/main.png" alt="Seven dashboards built with Neon Markdown Card: a PC monitor, a network uplink panel, a world threat map, a solar farm, network ports and a weather station" width="900">
-
-<img src="https://raw.githubusercontent.com/cerealkiller57540/neon-markdown-card/main/images/live.webp" alt="The PC monitor panel, live: CPU ring, GPU fan, power feed, liquid loop and core matrix animating" width="380">
-
-<img src="https://raw.githubusercontent.com/cerealkiller57540/neon-markdown-card/main/images/live-dns.webp" alt="A DNS filter panel, live: two resolvers with query rings, a packet flow animation and block rate" width="380">
+<img src="https://raw.githubusercontent.com/cerealkiller57540/neon-markdown-card/main/images/examples.png" alt="Six Neon Markdown Cards on a dark theme: weather, lights, energy, a thermostat, home security and batteries, with a neon header, a plain header or no header" width="900">
 
 </div>
 
-Every panel above is **one `neon-markdown-card`**: no other custom card, no template sensor written for it. The body is HTML (or Markdown) with Jinja-style templates, evaluated in the browser against the live states: `{% for %}` over an attribute list, `{% set %}`, macros, filters, SVG sparklines from the recorder history, `<style>` blocks with `@container` queries and keyframe animations. The header on top is optional: a neon title whose icon, colours, glow, gradient, flicker and CRT scanline are all yours to set, or no header at all.
+Every panel above is **one `neon-markdown-card`**: no other custom card, no template sensor written for it. The body is HTML (or Markdown) with Jinja-style templates, evaluated in the browser against the live states: `{% for %}` over an attribute list, `{% set %}`, macros, filters, SVG sparklines from the recorder history, `<style>` blocks with `@container` queries and keyframe animations. The header on top is optional: a neon title whose icon, colours, glow, gradient, flicker and CRT scanline are all yours to set, a plain title, or no header at all.
 
-*These screenshots are examples of what the templates can do, taken from the author's dashboard (French labels, real data, Neo Tokyo theme). The card ships the engine and the header, not these layouts: you write the body.*
+*Weather, Energy and Batteries use a neon header, Lights and Living room a plain one, the security panel has none (`mode: body`). The YAML of each card is in [`examples/`](examples/): copy it and replace the entity ids with yours. The card ships the engine and the header, not these layouts: you write the body.*
 
 ## ✨ Features
 
@@ -35,6 +31,20 @@ Every panel above is **one `neon-markdown-card`**: no other custom card, no temp
 - **25 ready-made keyframes** (`nmc-flicker`, `nmc-scan-scroll`, `nmc-ring-spin`, `nmc-data-flow`, `nmc-pulse-travel`, `nmc-dash-crawl`…) to use in inline `animation:`.
 - **Visual editor** for the header and frame; the body is edited as text.
 - `debug: true` prints template errors under the body. Guard rails cap output size, loop iterations and nesting depth, so a broken template cannot freeze the dashboard.
+
+## 🖼️ Advanced examples
+
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/cerealkiller57540/neon-markdown-card/main/images/main.png" alt="Seven dashboards built with Neon Markdown Card: a PC monitor, a network uplink panel, a world threat map, a solar farm, network ports and a weather station" width="900">
+
+<img src="https://raw.githubusercontent.com/cerealkiller57540/neon-markdown-card/main/images/live.webp" alt="The PC monitor panel, live: CPU ring, GPU fan, power feed, liquid loop and core matrix animating" width="380">
+
+<img src="https://raw.githubusercontent.com/cerealkiller57540/neon-markdown-card/main/images/live-dns.webp" alt="A DNS filter panel, live: two resolvers with query rings, a packet flow animation and block rate" width="380">
+
+</div>
+
+*Taken from the author's dashboard (French labels, real data, Neo Tokyo theme, glass background). Each panel is still one `neon-markdown-card`.*
 
 ## 📦 Installation
 

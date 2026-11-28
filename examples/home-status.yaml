@@ -1,0 +1,36 @@
+# Neon Markdown Card example: home-status
+# Replace these entity ids with yours:
+#   alarm_control_panel.home
+#   binary_sensor.front_door
+#   binary_sensor.back_door
+#   binary_sensor.garage_door
+#   binary_sensor.kitchen_window
+#   binary_sensor.hallway_motion
+#   lock.front_door
+type: custom:neon-markdown-card
+mode: body
+body:
+  content: |-
+    <style>.lbl{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--secondary-text-color)}
+    .hd{display:flex;align-items:center;gap:12px;padding-bottom:12px;margin-bottom:6px;border-bottom:1px solid rgba(0,255,156,.15)}
+    .hd ha-icon{--mdc-icon-size:34px;color:#00ff9c;filter:drop-shadow(0 0 8px rgba(0,255,156,.6))}
+    .hd b{display:block;font-size:17px;font-weight:500}
+    .it{display:flex;align-items:center;gap:10px;padding:7px 0;font-size:14px}
+    .it ha-icon{--mdc-icon-size:20px;color:#5b6273}
+    .it .s{margin-left:auto;font-size:11px;letter-spacing:.1em;padding:3px 8px;border-radius:20px;border:1px solid rgba(0,255,156,.3);color:#00ff9c}
+    .it.warn ha-icon{color:#ff2d6b}
+    .it.warn .s{border-color:rgba(255,45,107,.5);color:#ff2d6b;animation:nmc-flicker 3s infinite}
+    </style>
+    {% set alarm = states('alarm_control_panel.home') %}
+    <div class="hd" data-entity="alarm_control_panel.home">[mdi:shield-home]<div><span class="lbl">No header, body only</span><b>{{ 'Armed · home' if alarm == 'armed_home' else alarm }}</b></div></div>
+    {% set items = [
+     {'e':'lock.front_door','n':'Front door lock','on':'unlocked','i':'lock','w':'OPEN','k':'LOCKED'},
+     {'e':'binary_sensor.front_door','n':'Front door','on':'on','i':'door-closed','w':'OPEN','k':'CLOSED'},
+     {'e':'binary_sensor.back_door','n':'Back door','on':'on','i':'door-closed','w':'OPEN','k':'CLOSED'},
+     {'e':'binary_sensor.garage_door','n':'Garage','on':'on','i':'garage-open','w':'OPEN','k':'CLOSED'},
+     {'e':'binary_sensor.kitchen_window','n':'Kitchen window','on':'on','i':'window-open','w':'OPEN','k':'CLOSED'},
+     {'e':'binary_sensor.hallway_motion','n':'Hallway','on':'on','i':'motion-sensor','w':'MOTION','k':'CLEAR'}
+    ] %}
+    {% for it in items %}{% set bad = states(it.e) == it.on %}
+    <div class="it {{ 'warn' if bad else '' }}" data-entity="{{ it.e }}"><ha-icon icon="mdi:{{ it.i }}"></ha-icon>{{ it.n }}<span class="s">{{ it.w if bad else it.k }}</span></div>
+    {% endfor %}
