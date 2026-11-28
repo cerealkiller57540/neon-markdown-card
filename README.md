@@ -144,6 +144,8 @@ body:
 
 **Is this the same Jinja as Home Assistant?** No. It is a separate engine that runs in your browser and covers the common subset listed above. A template that works in the HA developer tools may need small changes (no `|` inside a composed arithmetic expression: use `floor()` instead of `|int` there). Turn on `debug: true` to see what fails.
 
+**Can an AI write the card for me?** Yes, but assistants write Home Assistant Jinja, which this engine does not fully follow. Paste [`AI_PROMPT.md`](AI_PROMPT.md) into the chat first: it lists what the engine supports and the traps to avoid, each one tested on the engine.
+
 <a id="upgrading-to-50"></a>**I upgraded to 5.0 and my HTML shows as text.** Since 5.0, `{{ }}` escapes its value, like Jinja with autoescape on. Markup written in the body itself is untouched; only markup built inside an expression is affected. Two ways to keep it:
 
 ```jinja
