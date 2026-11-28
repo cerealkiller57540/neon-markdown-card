@@ -2,7 +2,7 @@
 
 Asking ChatGPT, Claude, Gemini or any other assistant to write a `neon-markdown-card`? Paste the prompt below first, then describe the card you want and list your entity ids.
 
-**Why it helps:** the card renders its templates directly in your browser, with its own Jinja engine. That is what makes it instant: no round trip to the server, updates as soon as a state changes. Since version 5.1 the engine follows Home Assistant's Jinja closely, so the templates assistants already know work as they are. The prompt adds what is specific to this card (layout, theme, interactions, history, safety rules), so the result looks right on the first try. Every rule in it was checked on version 5.1.0.
+**Why it helps:** the card renders its templates directly in your browser, with its own Jinja engine. That is what makes it instant: no round trip to the server, updates as soon as a state changes. Since version 5.1 the engine follows Home Assistant's Jinja closely, so the templates assistants already know work as they are. The prompt adds what is specific to this card (layout, theme, interactions, history, safety rules), so the result looks right on the first try. Every rule in it was checked on version 5.1.1.
 
 Fill in the two lines at the end (`MY CARD`, `MY ENTITIES`), then send it.
 
@@ -56,6 +56,8 @@ Good habits for readable cards:
 - Booleans print as `True` / `False`; use them in `{% if %}` rather than as text.
 - `x|round(2)` keeps the decimals for display (`1.4|round(2)` → `1.40`, `0|round(2)` →
   `0.00`), handy for `kW` or `€` values.
+- Lists and dicts read from an entity are read-only: copy them before changing them
+  (`{% set l = state_attr('sensor.x', 'items')|list %}{% set _ = l.append(4) %}`).
 
 The card is forgiving where Home Assistant would stop with an error, so one missing sensor
 never blanks the whole card: an unknown entity or attribute renders empty, `none` renders

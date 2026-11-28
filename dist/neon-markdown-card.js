@@ -1,4 +1,4 @@
-/* ── neon-markdown-card v5.1.0 ──
+/* ── neon-markdown-card v5.1.1 ──
  * Header néon (repris de neon-header-card-v2) + BODY full HTML/Markdown/Jinja.
  *
  *   type: custom:neon-markdown-card
@@ -203,9 +203,16 @@
  *   Dépendances : is_state_attr, has_value et les ids passés par variable déclenchent le rendu.
  *   Tolérances gardées : opérations invalides et entités absentes rendent une valeur au lieu
  *   d'une erreur ; none et undefined s'affichent vide ; 6/3 → 2.
+ *
+ * ── v5.1.1 (28/11/2026) ──
+ *   append / extend / insert / pop / update ne modifient que les listes et dicts créés par le
+ *   template : ceux d'une entité sont les objets de hass.states, partagés par tout le frontend
+ *   (la modification se cumulait à chaque rendu). Copie d'abord avec |list ou dict(x).
+ *   {% filter %} s'applique au texte et non à ses entités HTML (truncate coupait « &lt; » en « &l »).
+ *   « macro is callable » → True.
  */
 
-const NMC_VERSION = "5.1.0";
+const NMC_VERSION = "5.1.1";
 
 // Valeur de config remise dans le HTML de l'éditeur (attribut ou <textarea>) : échappée pour qu'elle ressorte à l'identique.
 function nmcEscAttr(v) { return String(v ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -382,6 +389,12 @@ function nmcParseDate(s) {
   return Date.parse(t);
 }
 
+// Listes/dicts créés par le template. Les autres viennent de hass.states (partagés).
+const _nmcOwned = new WeakSet();
+function _nmcOwn(o) { _nmcOwned.add(o); return o; }
+function _nmcMutable(o) {
+  if (!_nmcOwned.has(o)) throw new Error(_t("valeur d'entité en lecture seule : copie-la avec |list ou dict()"));
+}
 function nmcIsPlain(o) {
   if (o === null || typeof o !== "object" || Array.isArray(o)) return false;
   const p = Object.getPrototypeOf(o);
@@ -979,12 +992,12 @@ function nmcEv(n, V, E) {
       if (Object.prototype.hasOwnProperty.call(NMC_CONSTS, n.v)) return NMC_CONSTS[n.v];
       return NMC_UNDEF;
     }
-    case "list": return n.items.map((x) => nmcEv(x, V, E));
+    case "list": return _nmcOwn(n.items.map((x) => nmcEv(x, V, E)));
     case "tuple": return nmcTup(n.items.map((x) => nmcEv(x, V, E)));
     case "dict": {
       const o = {};
       for (const [k, v] of n.pairs) o[nmcToStr(nmcEv(k, V, E))] = nmcEv(v, V, E);
-      return o;
+      return _nmcOwn(o);
     }
     case "attr": return nmcAttr(nmcEv(n.o, V, E), n.name);
     case "sub": {
@@ -1001,6 +1014,8 @@ function nmcEv(n, V, E) {
       return nmcFilter(n.name, nmcEv(n.e, V, E), args, kw, E);
     }
     case "test": {
+      if (n.name === "callable" && n.e.k === "name" && nmcLookupRaw(V, NMC_MACRO_PREFIX + n.e.v))
+        return !n.neg;
       const { args, kw } = nmcEvArgs(n, V, E);
       const r = nmcTest(n.name, nmcEv(n.e, V, E), args, kw, E);
       return !!(n.neg ? !r : r);
@@ -1056,7 +1071,7 @@ function nmcBin(op, a, b) {
   if (op === "~") return nmcConcat(a, b);
   const ua = a instanceof NmcSafe ? a.s : a, ub = b instanceof NmcSafe ? b.s : b;
   if (op === "+") {
-    if (Array.isArray(ua) && Array.isArray(ub)) return ua.concat(ub);
+    if (Array.isArray(ua) && Array.isArray(ub)) return _nmcOwn(ua.concat(ub));
     if (typeof ua === "string" && typeof ub === "string" && !(nmcNumLike(ua) && nmcNumLike(ub))) return nmcConcat(a, b);
     if (ua instanceof NmcDT && ub instanceof NmcTD) return new NmcDT(ua.ms + ub.s * 1000, ua.utc);
     if (ua instanceof NmcTD && ub instanceof NmcTD) return new NmcTD(ua.s + ub.s);
@@ -1283,9 +1298,9 @@ function nmcFunc(name, a, kw, V, E) {
         if (Array.isArray(a[0])) for (const p of a[0]) { if (Array.isArray(p)) o[nmcToStr(p[0])] = p[1]; }
         else if (nmcIsPlain(a[0])) Object.assign(o, a[0]);
       }
-      return Object.assign(o, kw);
+      return _nmcOwn(Object.assign(o, kw));
     }
-    case "namespace": return Object.assign({}, a[0] && nmcIsPlain(a[0]) ? a[0] : {}, kw);
+    case "namespace": return _nmcOwn(Object.assign({}, a[0] && nmcIsPlain(a[0]) ? a[0] : {}, kw));
     case "zip": {
       const ls = a.map((x) => (Array.isArray(x) ? x : []));
       const n = ls.length ? Math.min(...ls.map((x) => x.length)) : 0;
@@ -1409,6 +1424,7 @@ function nmcMethod(o, name, a, kw, E) {
     }
   }
   if (Array.isArray(o)) {
+    if (name === "append" || name === "extend" || name === "insert" || name === "pop") _nmcMutable(o);
     switch (name) {
       case "append":
         if (o.length >= NMC_MAX_TEMPLATE_ITERATIONS) throw new Error(_t("liste trop longue"));
@@ -1433,7 +1449,7 @@ function nmcMethod(o, name, a, kw, E) {
       case "items": return Object.keys(o).map((k) => nmcTup([k, o[k]]));
       case "keys": return Object.keys(o);
       case "values": return Object.values(o);
-      case "update": if (nmcIsPlain(a[0])) Object.assign(o, a[0]); Object.assign(o, kw); return NMC_UNDEF;
+      case "update": _nmcMutable(o); if (nmcIsPlain(a[0])) Object.assign(o, a[0]); Object.assign(o, kw); return NMC_UNDEF;
     }
   }
   throw new Error(`.${name}() → ${_t("méthode inconnue")}`);
@@ -1762,8 +1778,8 @@ function nmcFilter(name, r, a, kw, E) {
     case "list":
       if (r == null || r === NMC_UNDEF) return [];
       if (Array.isArray(r) || typeof r === "string" || r instanceof NmcSafe || nmcIsPlain(r) || r instanceof NmcDomain || r instanceof NmcStatesRoot)
-        return _nmcSeq(r).slice();
-      return [r];
+        return _nmcOwn(_nmcSeq(r).slice());
+      return _nmcOwn([r]);
     case "safe": return r instanceof NmcSafe ? r : new NmcSafe(nmcToStr(r));
     case "e": case "escape": case "forceescape":
       return r instanceof NmcSafe && name !== "forceescape" ? r : new NmcSafe(nmcEscStr(nmcToStr(r)));
@@ -2110,8 +2126,16 @@ function nmcRenderNodes(nodes, hass, vars, errs, ctx) {
           break;
         }
         case "filter": {
-          const v = new NmcSafe(nmcRenderNodes(n.body, hass, vars, errs, ctx));
-          try { append(nmcToStr(nmcEv(n.e, withBody(vars, v), E))); }
+          const html = nmcRenderNodes(n.body, hass, vars, errs, ctx), ents = [];
+          const pua = !/[\uE000-\uF8FF]/.test(html);
+          const enc = pua ? html.replace(/&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]*);/gi, (m) => {
+            if (ents.length >= 6400) return m;
+            ents.push(m); return String.fromCharCode(0xE000 + ents.length - 1);
+          }) : html;
+          try {
+            const r = nmcToStr(nmcEv(n.e, withBody(vars, new NmcSafe(enc)), E));
+            append(ents.length ? r.replace(/[\uE000-\uF8FF]/g, (c) => ents[c.charCodeAt(0) - 0xE000] || c) : r);
+          }
           catch (e) { warn(`filter → ${_nmcErrMsg(e)}`); }
           break;
         }
@@ -3018,6 +3042,7 @@ const _EN = {
  "liste trop longue": "list too long",
  "manquant": "missing",
  "méthode inconnue": "unknown method",
+ "valeur d'entité en lecture seule : copie-la avec |list ou dict()": "entity value is read-only: copy it with |list or dict()",
  "nom attendu": "name expected",
  "nom de test attendu": "test name expected",
  "pas un namespace": "not a namespace",
