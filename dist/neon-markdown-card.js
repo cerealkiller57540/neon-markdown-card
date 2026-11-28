@@ -1,4 +1,4 @@
-/* ── neon-markdown-card v5.1.1 ──
+/* ── neon-markdown-card v5.1.2 ──
  * Header néon (repris de neon-header-card-v2) + BODY full HTML/Markdown/Jinja.
  *
  *   type: custom:neon-markdown-card
@@ -210,9 +210,13 @@
  *   (la modification se cumulait à chaque rendu). Copie d'abord avec |list ou dict(x).
  *   {% filter %} s'applique au texte et non à ses entités HTML (truncate coupait « &lt; » en « &l »).
  *   « macro is callable » → True.
+ *
+ * ── v5.1.2 (28/11/2026) ──
+ *   Les listes neuves rendues par un filtre (sort, select, map…), une méthode (split, keys…) ou
+ *   range/expand/zip redeviennent modifiables : la 5.1.1 n'en marquait que trois sortes.
  */
 
-const NMC_VERSION = "5.1.1";
+const NMC_VERSION = "5.1.2";
 
 // Valeur de config remise dans le HTML de l'éditeur (attribut ou <textarea>) : échappée pour qu'elle ressorte à l'identique.
 function nmcEscAttr(v) { return String(v ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -392,6 +396,21 @@ function nmcParseDate(s) {
 // Listes/dicts créés par le template. Les autres viennent de hass.states (partagés).
 const _nmcOwned = new WeakSet();
 function _nmcOwn(o) { _nmcOwned.add(o); return o; }
+// Conteneurs neufs rendus par un filtre/une méthode/une fonction : modifiables comme en Jinja.
+// Le contrôle « v !== src » écarte les filtres qui rendent leur entrée telle quelle (map sans argument).
+const NMC_FRESH_FILTERS = new Set(["slice", "batch", "reverse", "sort", "unique", "dictsort", "items", "groupby",
+  "map", "selectattr", "rejectattr", "select", "reject", "regex_findall", "from_json"]);
+const NMC_FRESH_METHODS = new Set(["split", "rsplit", "splitlines", "items", "keys", "values"]);
+const NMC_FRESH_FUNCS = new Set(["range", "expand", "zip"]);
+// Profondeur : slice/batch créent aussi les sous-listes ; from_json crée tout l'arbre.
+// groupby : seuls le groupe et sa liste sont neufs, la clé (grouper) peut venir d'une entité.
+const NMC_FRESH_DEPTH = { slice: 1, batch: 1, from_json: 64 };
+function _nmcFresh(v, src, depth) {
+  if (v === src || !(Array.isArray(v) || nmcIsPlain(v)) || _nmcOwned.has(v)) return v;
+  _nmcOwn(v);
+  if (depth > 0) for (const c of Array.isArray(v) ? v : Object.values(v)) _nmcFresh(c, src, depth - 1);
+  return v;
+}
 function _nmcMutable(o) {
   if (!_nmcOwned.has(o)) throw new Error(_t("valeur d'entité en lecture seule : copie-la avec |list ou dict()"));
 }
@@ -1011,7 +1030,9 @@ function nmcEv(n, V, E) {
     case "call": return nmcCall(n, V, E);
     case "filt": {
       const { args, kw } = nmcEvArgs(n, V, E);
-      return nmcFilter(n.name, nmcEv(n.e, V, E), args, kw, E);
+      const src = nmcEv(n.e, V, E), r = nmcFilter(n.name, src, args, kw, E);
+      if (n.name === "groupby" && Array.isArray(r)) for (const g of r) { _nmcOwn(g); _nmcOwn(g[1]); }
+      return NMC_FRESH_FILTERS.has(n.name) ? _nmcFresh(r, src, NMC_FRESH_DEPTH[n.name] || 0) : r;
     }
     case "test": {
       if (n.name === "callable" && n.e.k === "name" && nmcLookupRaw(V, NMC_MACRO_PREFIX + n.e.v))
@@ -1115,12 +1136,14 @@ function nmcCall(n, V, E) {
     const { args, kw } = nmcEvArgs(n, V, E);
     if (def) return nmcInvokeMacro(name, def, args, kw, V, E, null);
     if (name === "caller") throw new Error(`caller() → ${_t("hors d'un bloc call")}`);
-    return nmcFunc(name, args, kw, V, E);
+    const r = nmcFunc(name, args, kw, V, E);
+    return NMC_FRESH_FUNCS.has(name) ? _nmcFresh(r, args[0], 0) : r;
   }
   if (n.f.k === "attr") {
     const o = nmcEv(n.f.o, V, E);
     const { args, kw } = nmcEvArgs(n, V, E);
-    return nmcMethod(o, n.f.name, args, kw, E);
+    const r = nmcMethod(o, n.f.name, args, kw, E);
+    return NMC_FRESH_METHODS.has(n.f.name) ? _nmcFresh(r, o, 0) : r;
   }
   throw new Error(_t("appel invalide"));
 }

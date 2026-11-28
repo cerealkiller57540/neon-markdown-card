@@ -2,7 +2,7 @@
 
 Asking ChatGPT, Claude, Gemini or any other assistant to write a `neon-markdown-card`? Paste the prompt below first, then describe the card you want and list your entity ids.
 
-**Why it helps:** the card renders its templates directly in your browser, with its own Jinja engine. That is what makes it instant: no round trip to the server, updates as soon as a state changes. Since version 5.1 the engine follows Home Assistant's Jinja closely, so the templates assistants already know work as they are. The prompt adds what is specific to this card (layout, theme, interactions, history, safety rules), so the result looks right on the first try. Every rule in it was checked on version 5.1.1.
+**Why it helps:** the card renders its templates directly in your browser, with its own Jinja engine. That is what makes it instant: no round trip to the server, updates as soon as a state changes. Since version 5.1 the engine follows Home Assistant's Jinja closely, so the templates assistants already know work as they are. The prompt adds what is specific to this card (layout, theme, interactions, history, safety rules), so the result looks right on the first try. Every rule in it was checked on version 5.1.2.
 
 Fill in the two lines at the end (`MY CARD`, `MY ENTITIES`), then send it.
 
