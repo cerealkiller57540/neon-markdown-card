@@ -21,7 +21,7 @@ Every panel above is **one `neon-markdown-card`**: no other custom card, no temp
 
 ## ✨ Features
 
-- **Client-side template engine**: `set`, `if / elif / else`, `for` (with `loop.*` and `else`), `macro` (with keyword arguments and `{% call %}` / `caller()`), `range()`, `now()`, `states()`, `state_attr()`, `states.domain.entity.attribute`, `as_timestamp()`, ternaries, `~` concatenation, Python slicing (`items[:3]`, `text[-2:]`), and about thirty filters (`round`, `int`, `default`, `sort`, `map`, `selectattr`, `sum`, `clamp`, `format`, `zfill`, `thousands`, `indent`, `slice`…). No round-trip to the server: the card only re-renders when one of the entities it reads changes.
+- **Client-side Jinja engine, aligned with Home Assistant's**: `set`, `if / elif / else`, `for` (with `loop.*`, `else` and `for k, v in d.items()`), `namespace()`, `macro` (with keyword arguments and `{% call %}` / `caller()`), whitespace control `{%- -%}`, `states()`, `state_attr()`, `is_state()`, `has_value()`, `expand()`, `states.domain.entity.attribute`, `now()`, `as_timestamp()`, `timestamp_custom()`, ternaries, `//`, `**`, `~`, `%` formatting, slicing and negative indexes, and the usual filters (`round`, `int`, `float`, `default`, `sort`, `map`, `select`, `selectattr`, `sum`, `min`, `max`, `dictsort`, `format`, `truncate`, `clamp`, `zfill`, `thousands`…). No round-trip to the server: the card only re-renders when one of the entities it reads changes.
 - **Escaped by default**: `{{ expression }}` prints text. A state, an attribute or a variable that contains `<b>` shows `<b>`, it does not become markup. HTML you build on purpose goes through `|safe` or a macro (see [Upgrading to 5.0](#upgrading-to-50)).
 - **Full HTML and SVG body**, sanitised: layout tags, tables, images from `/local`, inline SVG, `<style>` blocks scoped to the card (classes, `@container`, `@media`, gradients, `clip-path`, `mask`, animations). Scripts, event handlers, external URLs and `javascript:` links are removed.
 - **History sparklines**: declare `history: [{entity, hours}]` and draw `hist['sensor.x'].pts` straight into an SVG `<polyline>`.
@@ -142,9 +142,9 @@ body:
 
 ## ❓ FAQ
 
-**Is this the same Jinja as Home Assistant?** No. It is a separate engine that runs in your browser and covers the common subset listed above. A template that works in the HA developer tools may need small changes (no `|` inside a composed arithmetic expression: use `floor()` instead of `|int` there). Turn on `debug: true` to see what fails.
+**Is this the same Jinja as Home Assistant?** It is a separate engine that runs in your browser, and since 5.1 it follows Home Assistant's Jinja: a template from the HA developer tools works as it is, with the same output (booleans as `True` / `False`, Python rounding, tuples). It is more forgiving than the server where that helps a dashboard: an unknown entity or attribute renders empty instead of stopping the card, and `|round(2)` keeps its decimals for display (`1.20 kW`). Turn on `debug: true` to see any template error inside the card.
 
-**Can an AI write the card for me?** Yes. Paste [`AI_PROMPT.md`](AI_PROMPT.md) into the chat first: it teaches the assistant how this browser engine likes its templates written, so the card works on the first try. Every rule in it was checked on the engine.
+**Can an AI write the card for me?** Yes. Paste [`AI_PROMPT.md`](AI_PROMPT.md) into the chat first: it gives the assistant the card's layout, theme, interaction and safety rules, so the card works on the first try. Every rule in it was checked on the engine.
 
 <a id="upgrading-to-50"></a>**I upgraded to 5.0 and my HTML shows as text.** Since 5.0, `{{ }}` escapes its value, like Jinja with autoescape on. Markup written in the body itself is untouched; only markup built inside an expression is affected. Two ways to keep it:
 

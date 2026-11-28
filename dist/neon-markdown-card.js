@@ -1,4 +1,4 @@
-/* ── neon-markdown-card v5.0.1 ──
+/* ── neon-markdown-card v5.1.0 ──
  * Header néon (repris de neon-header-card-v2) + BODY full HTML/Markdown/Jinja.
  *
  *   type: custom:neon-markdown-card
@@ -191,9 +191,21 @@
  * ── v5.0.1 (27/11/2026) ──
  *   Titre rendu sans échappement (il est posé par textContent) : « Tom & Jerry » ou une
  *   apostrophe ne s'affichent plus en &amp; / &#39; dans le header.
+ *
+ * ── v5.1.0 (28/11/2026) ── moteur Jinja réécrit (lexer → AST → évaluateur)
+ *   Sorties alignées sur le Jinja de HA (vérifiées sur /api/template) :
+ *   - booléens réels, affichés True / False (avant : 1 / 0) ; l'arithmétique reste 1 / 0 ;
+ *   - round : valeur de Python (égalité exacte → chiffre pair : 85.25 → 85.2), n décimales fixes
+ *     conservées à l'affichage (1.20, 0.00) ; round() en fonction suit la même règle ;
+ *   - tuples affichés (a, b) (items(), dictsort) ; none|string → None ; 'fmt' % x en printf ;
+ *   - truncate à la Jinja (length 255, killwords, end '...', leeway 5).
+ *   Chaîne "False" fausse en condition (booléen sorti en texte par une macro ou un set-bloc).
+ *   Dépendances : is_state_attr, has_value et les ids passés par variable déclenchent le rendu.
+ *   Tolérances gardées : opérations invalides et entités absentes rendent une valeur au lieu
+ *   d'une erreur ; none et undefined s'affichent vide ; 6/3 → 2.
  */
 
-const NMC_VERSION = "5.0.1";
+const NMC_VERSION = "5.1.0";
 
 // Valeur de config remise dans le HTML de l'éditeur (attribut ou <textarea>) : échappée pour qu'elle ressorte à l'identique.
 function nmcEscAttr(v) { return String(v ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -207,10 +219,7 @@ const NMC_MAX_TEMPLATE_DEPTH = 32;
 // JSON du dashboard, sinon on retombe sur "dupliquer le texte dans chaque card".
 // Ajouter une macro partagee = editer NMC_SHARED_MACROS_SRC + bumper NMC_VERSION +
 // pousser un hacstag (edition du .js, pas juste de la config).
-// fmt_eta : PAS de "|int" dans le corps — le mini-evaluateur arithmetique du moteur
-// (nmcEvalArith/nmcTokenize) ne connait pas le pipe ; floor() (nmcMathFns) le remplace.
-// Le routage vers cet evaluateur reconnait aussi un "%" isole (regex de garde), donc
-// pas de "+ 0" de contournement necessaire ici.
+// fmt_eta : floor() et "%" suivent Python (reste du signe du diviseur), comme HA.
 // hp_style : bloc <style> commun aux 12 cards de la vue Heat Plant (8 regles CSS
 // identiques : .tb .hz .tb-l .sec .tile .lbl .tv .tu). Un <style> emis par une macro
 // traverse nmcSanitizeBody intact, et deux <style> dans un meme body (ce bloc + un
@@ -299,7 +308,11 @@ function nmcLoadFont(family) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
- *  MOTEUR DE TEMPLATE — parseur séquentiel (compile → arbre → rend)
+ *  MOTEUR DE TEMPLATE — lexer → parseur (AST) → évaluateur, sémantique Jinja2
+ * ════════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════
+ *  MOTEUR DE TEMPLATE — lexer → arbre syntaxique → évaluateur
+ *  Grammaire et priorités calquées sur Jinja2 ; valeurs adaptées au navigateur.
  * ════════════════════════════════════════════════════════════════ */
 
 // Sortie {{ }} échappée par défaut (comme l'autoescape de Jinja) : un état ou un attribut
@@ -311,228 +324,1744 @@ class NmcSafe {
 }
 // Titre : posé par textContent, qui ne crée jamais de balise ; l'échapper afficherait &amp;.
 let _nmcRawOut = false;
+function nmcEscStr(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
 function nmcEscOut(v) {
   if (v instanceof NmcSafe) return v.s;
   if (_nmcRawOut) return nmcToStr(v);
-  return nmcToStr(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  return nmcEscStr(nmcToStr(v));
 }
+
+// Variable inconnue : imprime "", fausse, `is defined` faux, remplacée par |default.
+const NMC_UNDEF = Object.freeze({ nmcUndef: true });
+
+// Date : instant + drapeau UTC (now() est local, utcnow() UTC), imprimée comme Python.
+class NmcDT {
+  constructor(ms, utc) { this.ms = ms; this.utc = !!utc; }
+}
+// Durée (différence de deux dates, timedelta()) en secondes.
+class NmcTD {
+  constructor(s) { this.s = s; }
+}
+
+const _p2 = (n) => String(n).padStart(2, "0");
+function nmcDtParts(dt) {
+  const d = new Date(dt.ms), u = dt.utc;
+  return {
+    y: u ? d.getUTCFullYear() : d.getFullYear(), mo: (u ? d.getUTCMonth() : d.getMonth()) + 1,
+    d: u ? d.getUTCDate() : d.getDate(), h: u ? d.getUTCHours() : d.getHours(),
+    mi: u ? d.getUTCMinutes() : d.getMinutes(), s: u ? d.getUTCSeconds() : d.getSeconds(),
+    ms: u ? d.getUTCMilliseconds() : d.getMilliseconds(),
+    wd: u ? d.getUTCDay() : d.getDay(), off: u ? 0 : -d.getTimezoneOffset(),
+  };
+}
+function nmcTzStr(off, colon) {
+  const a = Math.abs(off);
+  return (off < 0 ? "-" : "+") + _p2(Math.floor(a / 60)) + (colon ? ":" : "") + _p2(a % 60);
+}
+function nmcDtStr(dt, sep) {
+  const p = nmcDtParts(dt);
+  const frac = p.ms ? "." + String(p.ms * 1000).padStart(6, "0") : "";
+  return `${p.y}-${_p2(p.mo)}-${_p2(p.d)}${sep || " "}${_p2(p.h)}:${_p2(p.mi)}:${_p2(p.s)}${frac}${nmcTzStr(p.off, true)}`;
+}
+function nmcTdStr(td) {
+  let s = Math.round(td.s), neg = s < 0;
+  if (neg) s = -s;
+  const days = Math.floor(s / 86400), r = s % 86400;
+  const hms = `${Math.floor(r / 3600)}:${_p2(Math.floor((r % 3600) / 60))}:${_p2(r % 60)}`;
+  return (neg ? "-" : "") + (days ? `${days} day${days > 1 ? "s" : ""}, ` : "") + hms;
+}
+
+// Dates HA ("2026-11-28T14:00:00.123456+00:00") : Safari refuse plus de 3 décimales
+// et l'espace entre date et heure.
+function nmcParseDate(s) {
+  if (typeof s !== "string") return NaN;
+  const t = s.trim().replace(/^(\d{4}-\d{2}-\d{2}) (\d)/, "$1T$2").replace(/(\.\d{3})\d+/, "$1");
+  return Date.parse(t);
+}
+
+function nmcIsPlain(o) {
+  if (o === null || typeof o !== "object" || Array.isArray(o)) return false;
+  const p = Object.getPrototypeOf(o);
+  return p === null || p === Object.prototype;
+}
+
+const NMC_TUPLE = Symbol("tuple");
+function nmcTup(a) { a[NMC_TUPLE] = true; return a; }
+function nmcRepr(v, depth) {
+  if (v === NMC_UNDEF || v == null) return "None";
+  if (v instanceof NmcSafe) v = v.s;
+  if (typeof v === "string") return "'" + v.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
+  if (v === true) return "True";
+  if (v === false) return "False";
+  if ((depth || 0) > 8) return "...";
+  if (Array.isArray(v)) {
+    const body = v.map((x) => nmcRepr(x, (depth || 0) + 1)).join(", ");
+    return v[NMC_TUPLE] ? "(" + body + (v.length === 1 ? ",)" : ")") : "[" + body + "]";
+  }
+  if (nmcIsPlain(v))
+    return "{" + Object.keys(v).map((k) => nmcRepr(k) + ": " + nmcRepr(v[k], (depth || 0) + 1)).join(", ") + "}";
+  return nmcToStr(v);
+}
+
+// round() de Python : arrondi correct sur la valeur binaire exacte, égalité exacte → chiffre pair.
+// toFixed arrondit déjà sur la valeur exacte mais tranche les égalités vers le haut ; on ne
+// corrige que ce cas, repéré sur le développement décimal exact (toFixed(100)).
+function nmcRoundEven(x, d) {
+  if (!isFinite(x) || Math.abs(x) >= 1e21) return x;
+  const r = Number(x.toFixed(d));
+  const ex = Math.abs(x).toFixed(100), dot = ex.indexOf(".");
+  const tail = ex.slice(dot + 1 + d);
+  if (!/^50*$/.test(tail)) return r;
+  const digits = (ex.slice(0, dot) + ex.slice(dot + 1, dot + 1 + d)).replace(/^0+/, "") || "0";
+  if (+digits[digits.length - 1] % 2 === 0) return Math.sign(x) * Number(digits) / Math.pow(10, d);
+  return r;
+}
+
 function nmcToStr(v) {
-  if (v == null) return "";
+  if (v == null || v === NMC_UNDEF) return "";
   if (v instanceof NmcSafe) return v.s;
+  if (v instanceof NmcDT) return nmcDtStr(v);
+  if (v instanceof NmcTD) return nmcTdStr(v);
+  if (Array.isArray(v) || nmcIsPlain(v)) return nmcRepr(v);
   if (typeof v === "object") return "";
+  if (typeof v === "boolean") return v ? "True" : "False";
   return String(v);
 }
 
-const _nmcTagRe = /\{\{\s*([\s\S]+?)\s*\}\}|\{\%\s*([\s\S]+?)\s*\%\}/g;
+// Chaînes fausses : souplesse HA pour les états ("off", "unknown"…) et un booléen sorti en texte
+// par une macro ou un set-bloc ("False"), qui serait vrai en Python.
+const NMC_FALSY_STR = new Set(["0", "off", "false", "False", "unavailable", "unknown", "None", ""]);
+function nmcTruthy(v) {
+  if (v === NMC_UNDEF || v == null || v === false) return false;
+  if (typeof v === "number") return v !== 0 && !isNaN(v);
+  if (v instanceof NmcSafe) v = v.s;
+  if (typeof v === "string") return !NMC_FALSY_STR.has(v);
+  if (Array.isArray(v)) return v.length > 0;
+  if (v instanceof NmcDomain) return v.list().length > 0;
+  if (v instanceof NmcTD) return v.s !== 0;
+  if (nmcIsPlain(v)) return Object.keys(v).length > 0;
+  return true;
+}
 
-// --- macros {% macro %} : etat de rendu courant, pour que l'appel depuis nmcAtom()
-// --- reste soumis aux memes garde-fous (profondeur / iterations / taille) que le reste.
+// Nombre "souple" : parseFloat, NaN → 0, booléen → 1/0 (True + 1 = 2 comme en Python), date → secondes.
+function nmcNum(v) {
+  if (typeof v === "number") return isNaN(v) ? 0 : v;
+  if (v === true) return 1;
+  if (v instanceof NmcSafe) v = v.s;
+  if (typeof v === "string") {
+    const n = parseFloat(v);
+    return isNaN(n) ? 0 : n;
+  }
+  if (v instanceof NmcDT) return v.ms / 1000;
+  if (v instanceof NmcTD) return v.s;
+  return 0;
+}
+const _nmcNumRe = /^\s*[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?\s*$/;
+function nmcNumLike(v) {
+  if (v instanceof NmcSafe) v = v.s;
+  return typeof v === "number" || typeof v === "boolean" || (typeof v === "string" && _nmcNumRe.test(v));
+}
+function nmcEq(a, b) {
+  if (a instanceof NmcSafe) a = a.s;
+  if (b instanceof NmcSafe) b = b.s;
+  const na = a === NMC_UNDEF || a == null, nb = b === NMC_UNDEF || b == null;
+  if (na || nb) return na && nb;
+  if (nmcNumLike(a) && nmcNumLike(b)) return nmcNum(a) === nmcNum(b);
+  if (Array.isArray(a) && Array.isArray(b))
+    return a.length === b.length && a.every((x, i) => nmcEq(x, b[i]));
+  if (a instanceof NmcDT && b instanceof NmcDT) return a.ms === b.ms;
+  if (typeof a === "object" || typeof b === "object") return a === b;
+  return String(a) === String(b);
+}
+// Ordre : numérique si les deux côtés se lisent comme des nombres, sinon alphabétique.
+function nmcOrd(a, b) {
+  if (a instanceof NmcSafe) a = a.s;
+  if (b instanceof NmcSafe) b = b.s;
+  const fa = typeof a === "boolean" || a instanceof NmcDT || a instanceof NmcTD ? nmcNum(a) : parseFloat(a);
+  const fb = typeof b === "boolean" || b instanceof NmcDT || b instanceof NmcTD ? nmcNum(b) : parseFloat(b);
+  if (!isNaN(fa) && !isNaN(fb)) return fa < fb ? -1 : fa > fb ? 1 : 0;
+  const sa = nmcToStr(a), sb = nmcToStr(b);
+  return sa < sb ? -1 : sa > sb ? 1 : 0;
+}
+function nmcIn(x, c) {
+  if (c instanceof NmcSafe) c = c.s;
+  if (Array.isArray(c)) return c.some((y) => nmcEq(y, x));
+  if (typeof c === "string") return c.includes(nmcToStr(x));
+  if (c instanceof NmcDomain) return c.list().some((s) => s.entity_id === nmcToStr(x) || s.object_id === nmcToStr(x));
+  if (nmcIsPlain(c)) return Object.prototype.hasOwnProperty.call(c, nmcToStr(x));
+  return false;
+}
+
+/* ── États HA exposés comme dans Jinja : states.sensor.x.state, for s in states.light ── */
+const _nmcStWrap = new WeakMap();
+function nmcWrapState(s) {
+  if (!s || typeof s !== "object") return NMC_UNDEF;
+  let w = _nmcStWrap.get(s);
+  if (!w) {
+    const eid = String(s.entity_id || "");
+    const dot = eid.indexOf(".");
+    const attrs = s.attributes || {};
+    w = {
+      entity_id: eid, state: s.state, attributes: attrs,
+      last_changed: s.last_changed, last_updated: s.last_updated || s.last_changed,
+      last_reported: s.last_reported || s.last_updated || s.last_changed,
+      domain: eid.slice(0, dot), object_id: eid.slice(dot + 1),
+      name: attrs.friendly_name != null ? attrs.friendly_name : eid.slice(dot + 1),
+    };
+    _nmcStWrap.set(s, w);
+  }
+  return w;
+}
+class NmcStatesRoot {
+  constructor(hass) { this.hass = hass; }
+  get(k) {
+    k = nmcToStr(k);
+    if (k.includes(".")) return nmcWrapState(this.hass.states && this.hass.states[k]);
+    return new NmcDomain(this.hass, k);
+  }
+  list() {
+    const all = this.hass.states || {};
+    return Object.keys(all).sort().map((k) => nmcWrapState(all[k]));
+  }
+}
+class NmcDomain {
+  constructor(hass, domain) { this.hass = hass; this.domain = domain; this._l = null; }
+  get(k) {
+    return nmcWrapState(this.hass.states && this.hass.states[this.domain + "." + nmcToStr(k)]);
+  }
+  list() {
+    if (!this._l) {
+      const all = this.hass.states || {}, pre = this.domain + ".";
+      this._l = Object.keys(all).filter((k) => k.startsWith(pre)).sort().map((k) => nmcWrapState(all[k]));
+    }
+    return this._l;
+  }
+}
+
+class NmcLoop {
+  constructor(i, len, list, depth) {
+    this.index = i + 1; this.index0 = i;
+    this.revindex = len - i; this.revindex0 = len - i - 1;
+    this.first = i === 0; this.last = i === len - 1; this.length = len;
+    this.previtem = i > 0 ? list[i - 1] : NMC_UNDEF;
+    this.nextitem = i < len - 1 ? list[i + 1] : NMC_UNDEF;
+    this.depth = depth; this.depth0 = depth - 1;
+  }
+}
+
+// Recherche d'un nom dans la chaîne de scopes (Object.create) sans jamais lire Object.prototype.
+function nmcLookupRaw(vars, name) {
+  let o = vars;
+  while (o && o !== Object.prototype) {
+    if (Object.prototype.hasOwnProperty.call(o, name)) return o[name];
+    o = Object.getPrototypeOf(o);
+  }
+  return undefined;
+}
+const NMC_CONSTS = { pi: Math.PI, e: Math.E, tau: 2 * Math.PI, inf: Infinity };
+
+// Attribut / indice : propriétés propres seulement (pas de __proto__, constructor...).
+function nmcAttr(o, k) {
+  if (o === NMC_UNDEF || o == null) return NMC_UNDEF;
+  if (o instanceof NmcSafe) o = o.s;
+  if (o instanceof NmcStatesRoot || o instanceof NmcDomain) return o.get(k);
+  if (o instanceof NmcDT) {
+    const p = nmcDtParts(o);
+    const m = { year: p.y, month: p.mo, day: p.d, hour: p.h, minute: p.mi, second: p.s, microsecond: p.ms * 1000 };
+    return Object.prototype.hasOwnProperty.call(m, k) ? m[k] : NMC_UNDEF;
+  }
+  if (o instanceof NmcTD) {
+    if (k === "days") return Math.floor(o.s / 86400);
+    if (k === "seconds") return Math.floor(o.s - Math.floor(o.s / 86400) * 86400);
+    return NMC_UNDEF;
+  }
+  if (Array.isArray(o) || typeof o === "string") {
+    if (typeof k === "number" || /^-?\d+$/.test(String(k))) {
+      let i = Math.trunc(Number(k));
+      if (i < 0) i += o.length;
+      return i >= 0 && i < o.length ? o[i] : NMC_UNDEF;
+    }
+    if (Array.isArray(o) && k !== "length" && Object.prototype.hasOwnProperty.call(o, k)) return o[k];
+    return NMC_UNDEF;
+  }
+  if (typeof o === "object") {
+    k = typeof k === "string" ? k : nmcToStr(k);
+    if (!Object.prototype.hasOwnProperty.call(o, k)) return NMC_UNDEF;
+    return o[k] === undefined ? NMC_UNDEF : o[k];
+  }
+  return NMC_UNDEF;
+}
+// Chemin pointé pour selectattr / map / sort(attribute='a.b').
+function nmcPath(o, path) {
+  for (const seg of String(path).split(".")) o = nmcAttr(o, seg);
+  return o;
+}
+
+// Découpe façon Python (algorithme de slice.indices).
+function nmcSlice(seq, start, stop, step) {
+  if (seq instanceof NmcSafe) seq = seq.s;
+  const isStr = typeof seq === "string";
+  const arr = isStr ? Array.from(seq) : Array.isArray(seq) ? seq : null;
+  if (!arr) return NMC_UNDEF;
+  const len = arr.length;
+  step = step == null || step === NMC_UNDEF ? 1 : Math.trunc(nmcNum(step)) || 1;
+  const norm = (v, def, lo, hi) => {
+    if (v == null || v === NMC_UNDEF) return def;
+    v = Math.trunc(nmcNum(v));
+    if (v < 0) v += len;
+    return Math.max(lo, Math.min(hi, v));
+  };
+  let a, b;
+  if (step > 0) { a = norm(start, 0, 0, len); b = norm(stop, len, 0, len); }
+  else { a = norm(start, len - 1, -1, len - 1); b = norm(stop, -1, -1, len - 1); }
+  const out = [];
+  for (let i = a; step > 0 ? i < b : i > b; i += step) {
+    out.push(arr[i]);
+    if (out.length > NMC_MAX_TEMPLATE_OUTPUT) break;
+  }
+  return isStr ? out.join("") : out;
+}
+
+/* ── Lexer du template : texte, {{ }}, {% %}, {# #} ── */
+// La fermeture ne compte qu'hors chaîne et hors crochets : {{ {'a': 1} }} reste une seule balise.
+function nmcScanClose(text, k, close) {
+  let depth = 0, q = "";
+  for (let p = k; p < text.length; p++) {
+    const c = text[p];
+    if (q) {
+      if (c === "\\") p++;
+      else if (c === q) q = "";
+      continue;
+    }
+    if (c === "'" || c === '"') q = c;
+    else if (depth === 0 && c === close[0] && text[p + 1] === close[1]) return p;
+    else if (c === "(" || c === "[" || c === "{") depth++;
+    else if ((c === ")" || c === "]" || c === "}") && depth > 0) depth--;
+  }
+  return text.indexOf(close, k);
+}
+
+function nmcLexTemplate(text) {
+  const toks = [];
+  let i = 0, last = 0;
+  const pushText = (s) => { if (s) toks.push({ t: "text", s }); };
+  while (i < text.length) {
+    const j = text.indexOf("{", i);
+    if (j < 0 || j + 1 >= text.length) break;
+    const c2 = text[j + 1];
+    if (c2 !== "{" && c2 !== "%" && c2 !== "#") { i = j + 1; continue; }
+    const close = c2 === "{" ? "}}" : c2 === "%" ? "%}" : "#}";
+    let k = j + 2, lstrip = false;
+    if (text[k] === "-") { lstrip = true; k++; } else if (text[k] === "+") k++;
+    const end = c2 === "#" ? text.indexOf("#}", k) : nmcScanClose(text, k, close);
+    if (end < 0) { i = j + 2; continue; }
+    let inner = text.slice(k, end), rstrip = false;
+    if (inner.endsWith("-")) { rstrip = true; inner = inner.slice(0, -1); }
+    else if (inner.endsWith("+")) inner = inner.slice(0, -1);
+    pushText(text.slice(last, j));
+    last = i = end + 2;
+    const t = c2 === "{" ? "out" : c2 === "%" ? "tag" : "cmt";
+    toks.push({ t, s: inner, lstrip, rstrip });
+    // {% raw %} … {% endraw %} : contenu recopié tel quel
+    if (t === "tag" && inner.trim() === "raw") {
+      const re = /\{%(-?)\s*endraw\s*(-?)%\}/g;
+      re.lastIndex = last;
+      const m = re.exec(text);
+      const stop = m ? m.index : text.length;
+      let body = text.slice(last, stop);
+      if (rstrip) body = body.replace(/^\s+/, "");
+      if (m && m[1]) body = body.replace(/\s+$/, "");
+      toks.pop();
+      if (lstrip && toks.length && toks[toks.length - 1].t === "text")
+        toks[toks.length - 1].s = toks[toks.length - 1].s.replace(/\s+$/, "");
+      toks.push({ t: "text", s: body, raw: true });
+      last = i = m ? m.index + m[0].length : text.length;
+      if (m && m[2]) toks.push({ t: "cmt", s: "", lstrip: false, rstrip: true });
+    }
+  }
+  pushText(text.slice(last));
+  // contrôle des blancs {%- -%} : retire les blancs du texte voisin
+  for (let n = 0; n < toks.length; n++) {
+    const tk = toks[n];
+    if (tk.t === "text") continue;
+    if (tk.lstrip && n > 0 && toks[n - 1].t === "text" && !toks[n - 1].raw) toks[n - 1].s = toks[n - 1].s.replace(/\s+$/, "");
+    if (tk.rstrip && n + 1 < toks.length && toks[n + 1].t === "text" && !toks[n + 1].raw) toks[n + 1].s = toks[n + 1].s.replace(/^\s+/, "");
+  }
+  return toks;
+}
+
+/* ── Lexer d'expression ── */
+const NMC_OPS = ["**", "//", "==", "!=", "<=", ">=", "<", ">", "+", "-", "*", "/", "%", "~",
+  "(", ")", "[", "]", "{", "}", ",", ":", ".", "|", "="];
+const NMC_ESC = { n: "\n", t: "\t", r: "\r", "\\": "\\", "'": "'", '"': '"', "0": "\0" };
+function nmcLexExpr(s) {
+  const t = [];
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === " " || c === "\n" || c === "\t" || c === "\r") { i++; continue; }
+    if (c >= "0" && c <= "9") {
+      const m = /^\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][-+]?\d+)?/.exec(s.slice(i));
+      t.push({ k: "num", v: Number(m[0].replace(/_/g, "")) });
+      i += m[0].length;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      let v = "", p = i + 1, done = false;
+      for (; p < s.length; p++) {
+        const ch = s[p];
+        if (ch === "\\" && p + 1 < s.length) {
+          const nx = s[++p];
+          if (nx === "u" && /^[0-9a-fA-F]{4}$/.test(s.substr(p + 1, 4))) { v += String.fromCharCode(parseInt(s.substr(p + 1, 4), 16)); p += 4; }
+          else v += NMC_ESC[nx] !== undefined ? NMC_ESC[nx] : "\\" + nx;
+          continue;
+        }
+        if (ch === c) { done = true; break; }
+        v += ch;
+      }
+      if (!done) throw new Error(_t("chaîne non fermée"));
+      t.push({ k: "str", v });
+      i = p + 1;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      const m = /^[A-Za-z_]\w*/.exec(s.slice(i));
+      t.push({ k: "name", v: m[0] });
+      i += m[0].length;
+      continue;
+    }
+    const op = NMC_OPS.find((o) => s.startsWith(o, i));
+    if (!op) throw new Error(`${_t("caractère inattendu")} « ${c} »`);
+    t.push({ k: "op", v: op });
+    i += op.length;
+  }
+  t.push({ k: "eof" });
+  return t;
+}
+
+/* ── Analyseur d'expression (priorités de Jinja2) ── */
+const NMC_KW_NOARG = new Set(["and", "or", "not", "in", "is", "if", "else"]);
+class NmcParser {
+  constructor(toks) { this.t = toks; this.i = 0; this.d = 0; }
+  peek(o) { return this.t[Math.min(this.i + (o || 0), this.t.length - 1)]; }
+  next() { return this.t[this.i < this.t.length - 1 ? this.i++ : this.i]; }
+  isOp(v, o) { const k = this.peek(o); return k.k === "op" && k.v === v; }
+  isName(v, o) { const k = this.peek(o); return k.k === "name" && k.v === v; }
+  skipOp(v) { if (this.isOp(v)) { this.i++; return true; } return false; }
+  skipName(v) { if (this.isName(v)) { this.i++; return true; } return false; }
+  expectOp(v) {
+    if (!this.skipOp(v)) throw new Error(`${_t("attendu")} « ${v} », ${_t("trouvé")} ${this.desc()}`);
+  }
+  name() {
+    const k = this.next();
+    if (k.k !== "name") throw new Error(`${_t("nom attendu")}, ${_t("trouvé")} ${this.desc(-1)}`);
+    return k.v;
+  }
+  desc(o) {
+    const k = this.peek(o);
+    return k.k === "eof" ? _t("fin de l'expression") : `« ${k.k === "str" ? "'" + k.v + "'" : k.v} »`;
+  }
+  end() { if (this.peek().k !== "eof") throw new Error(`${_t("inattendu")}${_sep()}${this.desc()}`); }
+  atEnd() { const k = this.peek(); return k.k === "eof" || (k.k === "op" && (k.v === ")" || k.v === "]" || k.v === "}")); }
+
+  tuple(noCond) {
+    const first = this.expr(noCond);
+    if (!this.isOp(",")) return first;
+    const items = [first];
+    while (this.skipOp(",")) {
+      if (this.atEnd() || this.isName("in") || this.isName("if") || this.isOp("=")) break;
+      items.push(this.expr(noCond));
+    }
+    return { k: "tuple", items };
+  }
+  expr(noCond) {
+    if (++this.d > 100) throw new Error(_t("expression trop imbriquée"));
+    try {
+      const e = this.or();
+      if (noCond || !this.skipName("if")) return e;
+      const c = this.or();
+      const f = this.skipName("else") ? this.expr() : null;
+      return { k: "cond", t: e, c, f };
+    } finally { this.d--; }
+  }
+  or() {
+    let l = this.and();
+    while (this.skipName("or")) l = { k: "or", l, r: this.and() };
+    return l;
+  }
+  and() {
+    let l = this.not();
+    while (this.skipName("and")) l = { k: "and", l, r: this.not() };
+    return l;
+  }
+  not() {
+    if (this.isName("not") && !this.isName("in", 1)) { this.i++; return { k: "un", op: "not", e: this.not() }; }
+    return this.cmp();
+  }
+  cmp() {
+    const first = this.add(), ops = [];
+    for (;;) {
+      const k = this.peek();
+      if (k.k === "op" && ["==", "!=", "<", ">", "<=", ">="].includes(k.v)) { this.i++; ops.push([k.v, this.add()]); }
+      else if (this.skipName("in")) ops.push(["in", this.add()]);
+      else if (this.isName("not") && this.isName("in", 1)) { this.i += 2; ops.push(["notin", this.add()]); }
+      else break;
+    }
+    return ops.length ? { k: "cmp", first, ops } : first;
+  }
+  add() {
+    let l = this.concat();
+    while (this.isOp("+") || this.isOp("-")) { const op = this.next().v; l = { k: "bin", op, l, r: this.concat() }; }
+    return l;
+  }
+  concat() {
+    let l = this.mul();
+    while (this.skipOp("~")) l = { k: "bin", op: "~", l, r: this.mul() };
+    return l;
+  }
+  mul() {
+    let l = this.pow();
+    while (["*", "/", "//", "%"].some((o) => this.isOp(o))) { const op = this.next().v; l = { k: "bin", op, l, r: this.pow() }; }
+    return l;
+  }
+  pow() {
+    let l = this.unary();
+    while (this.skipOp("**")) l = { k: "bin", op: "**", l, r: this.unary() };
+    return l;
+  }
+  unary(noFilter) {
+    if (++this.d > 100) throw new Error(_t("expression trop imbriquée"));
+    try {
+      let n;
+      if (this.skipOp("-")) n = { k: "un", op: "neg", e: this.unary(true) };
+      else if (this.skipOp("+")) n = { k: "un", op: "pos", e: this.unary(true) };
+      else n = this.primary();
+      n = this.postfix(n);
+      return noFilter ? n : this.filters(n);
+    } finally { this.d--; }
+  }
+  primary() {
+    const k = this.next();
+    if (k.k === "num" || k.k === "str") {
+      let v = k.v;
+      // littéraux de chaîne adjacents : 'a' 'b' → 'ab'
+      if (k.k === "str") while (this.peek().k === "str") v += this.next().v;
+      return { k: "lit", v };
+    }
+    if (k.k === "name") {
+      if (k.v === "true" || k.v === "True") return { k: "lit", v: true };
+      if (k.v === "false" || k.v === "False") return { k: "lit", v: false };
+      if (k.v === "none" || k.v === "None") return { k: "lit", v: null };
+      return { k: "name", v: k.v };
+    }
+    if (k.k === "op" && k.v === "(") {
+      if (this.skipOp(")")) return { k: "tuple", items: [] };
+      const e = this.tuple();
+      this.expectOp(")");
+      return e;
+    }
+    if (k.k === "op" && k.v === "[") {
+      const items = [];
+      while (!this.isOp("]")) {
+        items.push(this.expr());
+        if (!this.skipOp(",")) break;
+      }
+      this.expectOp("]");
+      return { k: "list", items };
+    }
+    if (k.k === "op" && k.v === "{") {
+      const pairs = [];
+      while (!this.isOp("}")) {
+        const key = this.expr();
+        this.expectOp(":");
+        pairs.push([key, this.expr()]);
+        if (!this.skipOp(",")) break;
+      }
+      this.expectOp("}");
+      return { k: "dict", pairs };
+    }
+    // next() ne dépasse jamais eof : reculer seulement si un jeton a été consommé
+    if (k.k !== "eof") this.i--;
+    throw new Error(`${_t("inattendu")}${_sep()}${this.desc()}`);
+  }
+  postfix(n) {
+    for (;;) {
+      if (this.skipOp(".")) {
+        const k = this.next();
+        if (k.k !== "name" && k.k !== "num") throw new Error(`${_t("nom attendu")} ${_t("après")} « . »`);
+        n = { k: "attr", o: n, name: k.k === "num" ? String(k.v) : k.v };
+      } else if (this.skipOp("[")) {
+        n = this.subscript(n);
+      } else if (this.isOp("(")) {
+        this.i++;
+        n = Object.assign({ k: "call", f: n }, this.args());
+      } else return n;
+    }
+  }
+  subscript(o) {
+    const part = () => (this.isOp(":") || this.isOp("]") ? null : this.expr());
+    const a = part();
+    if (!this.isOp(":")) {
+      this.expectOp("]");
+      return { k: "sub", o, i: a };
+    }
+    this.i++;
+    const b = part();
+    const c = this.skipOp(":") ? part() : null;
+    this.expectOp("]");
+    return { k: "slice", o, a, b, c };
+  }
+  // appelé après "(" ; consomme jusqu'à ")"
+  args() {
+    const args = [], kw = [];
+    while (!this.isOp(")")) {
+      if (this.peek().k === "name" && this.isOp("=", 1)) {
+        const nm = this.next().v;
+        this.i++;
+        kw.push([nm, this.expr()]);
+      } else {
+        this.skipOp("*");
+        args.push(this.expr());
+      }
+      if (!this.skipOp(",")) break;
+    }
+    this.expectOp(")");
+    return { args, kw };
+  }
+  filterCall(e) {
+    let name = this.name();
+    while (this.isOp(".") && this.peek(1).k === "name") { this.i++; name += "." + this.next().v; }
+    const a = this.isOp("(") ? (this.i++, this.args()) : { args: [], kw: [] };
+    return Object.assign({ k: "filt", e, name }, a);
+  }
+  filters(n) {
+    for (;;) {
+      if (this.skipOp("|")) {
+        n = this.filterCall(n);
+      } else if (this.skipName("is")) {
+        const neg = this.skipName("not");
+        const tk = this.next();
+        if (tk.k !== "name" && tk.k !== "op") throw new Error(_t("nom de test attendu"));
+        let args = [], kw = [];
+        if (this.isOp("(")) {
+          this.i++;
+          ({ args, kw } = this.args());
+        } else {
+          const k = this.peek();
+          const starts = k.k === "num" || k.k === "str" || (k.k === "name" && !NMC_KW_NOARG.has(k.v)) ||
+            (k.k === "op" && (k.v === "[" || k.v === "{"));
+          if (starts) args = [this.postfix(this.primary())];
+        }
+        n = { k: "test", e: n, name: tk.v, neg, args, kw };
+      } else return n;
+    }
+  }
+}
+function nmcParseExpr(src) {
+  const p = new NmcParser(nmcLexExpr(src));
+  const e = p.tuple();
+  p.end();
+  return e;
+}
+
+/* ── Évaluateur d'expression ── */
+// E = { hass, errs, ctx, warn, root } : état du rendu en cours (garde-fous partagés).
+function nmcEv(n, V, E) {
+  switch (n.k) {
+    case "lit": return n.v;
+    case "name": {
+      const v = nmcLookupRaw(V, n.v);
+      if (v !== undefined) return v;
+      if (n.v === "states") return E.root || (E.root = new NmcStatesRoot(E.hass));
+      if (Object.prototype.hasOwnProperty.call(NMC_CONSTS, n.v)) return NMC_CONSTS[n.v];
+      return NMC_UNDEF;
+    }
+    case "list": return n.items.map((x) => nmcEv(x, V, E));
+    case "tuple": return nmcTup(n.items.map((x) => nmcEv(x, V, E)));
+    case "dict": {
+      const o = {};
+      for (const [k, v] of n.pairs) o[nmcToStr(nmcEv(k, V, E))] = nmcEv(v, V, E);
+      return o;
+    }
+    case "attr": return nmcAttr(nmcEv(n.o, V, E), n.name);
+    case "sub": {
+      const o = nmcEv(n.o, V, E), i = nmcEv(n.i, V, E);
+      return nmcAttr(o, typeof i === "number" ? i : nmcToStr(i));
+    }
+    case "slice": {
+      const ev = (x) => (x ? nmcEv(x, V, E) : null);
+      return nmcSlice(nmcEv(n.o, V, E), ev(n.a), ev(n.b), ev(n.c));
+    }
+    case "call": return nmcCall(n, V, E);
+    case "filt": {
+      const { args, kw } = nmcEvArgs(n, V, E);
+      return nmcFilter(n.name, nmcEv(n.e, V, E), args, kw, E);
+    }
+    case "test": {
+      const { args, kw } = nmcEvArgs(n, V, E);
+      const r = nmcTest(n.name, nmcEv(n.e, V, E), args, kw, E);
+      return !!(n.neg ? !r : r);
+    }
+    case "un": {
+      const v = nmcEv(n.e, V, E);
+      if (n.op === "not") return !nmcTruthy(v);
+      return n.op === "neg" ? -nmcNum(v) : nmcNum(v);
+    }
+    case "and": { const a = nmcEv(n.l, V, E); return nmcTruthy(a) ? nmcEv(n.r, V, E) : a; }
+    case "or": { const a = nmcEv(n.l, V, E); return nmcTruthy(a) ? a : nmcEv(n.r, V, E); }
+    case "cmp": {
+      let a = nmcEv(n.first, V, E);
+      for (const [op, x] of n.ops) {
+        const b = nmcEv(x, V, E);
+        if (!nmcCmpOp(op, a, b)) return false;
+        a = b;
+      }
+      return true;
+    }
+    case "bin": return nmcBin(n.op, nmcEv(n.l, V, E), nmcEv(n.r, V, E));
+    case "cond":
+      return nmcTruthy(nmcEv(n.c, V, E)) ? nmcEv(n.t, V, E) : n.f ? nmcEv(n.f, V, E) : NMC_UNDEF;
+  }
+  throw new Error(_t("expression invalide"));
+}
+function nmcEvArgs(n, V, E) {
+  const args = n.args.map((x) => nmcEv(x, V, E)), kw = {};
+  for (const [k, x] of n.kw) kw[k] = nmcEv(x, V, E);
+  return { args, kw };
+}
+function nmcCmpOp(op, a, b) {
+  switch (op) {
+    case "==": return nmcEq(a, b);
+    case "!=": return !nmcEq(a, b);
+    case "<": return nmcOrd(a, b) < 0;
+    case ">": return nmcOrd(a, b) > 0;
+    case "<=": return nmcOrd(a, b) <= 0;
+    case ">=": return nmcOrd(a, b) >= 0;
+    case "in": return nmcIn(a, b);
+    case "notin": return !nmcIn(a, b);
+  }
+  return false;
+}
+const _nmcFin = (r) => (isFinite(r) ? r : 0);
+// Concaténation qui respecte l'autoescape : une partie sûre reste sûre, l'autre est échappée.
+function nmcConcat(a, b) {
+  if (!_nmcRawOut && (a instanceof NmcSafe || b instanceof NmcSafe))
+    return new NmcSafe(nmcEscOut(a) + nmcEscOut(b));
+  return nmcToStr(a) + nmcToStr(b);
+}
+function nmcBin(op, a, b) {
+  if (op === "~") return nmcConcat(a, b);
+  const ua = a instanceof NmcSafe ? a.s : a, ub = b instanceof NmcSafe ? b.s : b;
+  if (op === "+") {
+    if (Array.isArray(ua) && Array.isArray(ub)) return ua.concat(ub);
+    if (typeof ua === "string" && typeof ub === "string" && !(nmcNumLike(ua) && nmcNumLike(ub))) return nmcConcat(a, b);
+    if (ua instanceof NmcDT && ub instanceof NmcTD) return new NmcDT(ua.ms + ub.s * 1000, ua.utc);
+    if (ua instanceof NmcTD && ub instanceof NmcTD) return new NmcTD(ua.s + ub.s);
+    return _nmcFin(nmcNum(ua) + nmcNum(ub));
+  }
+  if (op === "-") {
+    if (ua instanceof NmcDT && ub instanceof NmcDT) return new NmcTD((ua.ms - ub.ms) / 1000);
+    if (ua instanceof NmcDT && ub instanceof NmcTD) return new NmcDT(ua.ms - ub.s * 1000, ua.utc);
+    if (ua instanceof NmcTD && ub instanceof NmcTD) return new NmcTD(ua.s - ub.s);
+    return _nmcFin(nmcNum(ua) - nmcNum(ub));
+  }
+  if (op === "*") {
+    const rep = (s, n) => {
+      n = Math.max(0, Math.trunc(nmcNum(n)));
+      const len = (typeof s === "string" ? s.length : s.length) * n;
+      if (len > NMC_MAX_TEMPLATE_OUTPUT) throw new Error(_t("résultat trop long"));
+      return typeof s === "string" ? s.repeat(n) : [].concat(...Array(n).fill(s));
+    };
+    if ((typeof ua === "string" && !nmcNumLike(ua)) || Array.isArray(ua)) return rep(ua, ub);
+    if ((typeof ub === "string" && !nmcNumLike(ub)) || Array.isArray(ub)) return rep(ub, ua);
+    if (ua instanceof NmcTD) return new NmcTD(ua.s * nmcNum(ub));
+    return _nmcFin(nmcNum(ua) * nmcNum(ub));
+  }
+  if (op === "%" && typeof ua === "string" && !nmcNumLike(ua))
+    return nmcPrintf(ua, Array.isArray(ub) ? ub : [ub]);
+  const x = nmcNum(ua), y = nmcNum(ub);
+  switch (op) {
+    case "/": return y === 0 ? 0 : _nmcFin(x / y);
+    case "//": return y === 0 ? 0 : _nmcFin(Math.floor(x / y));
+    case "%": return y === 0 ? 0 : _nmcFin(x - y * Math.floor(x / y));
+    case "**": return _nmcFin(Math.pow(x, y));
+  }
+  return 0;
+}
+
+/* ── Appels : macro, fonction, méthode ── */
+function nmcCall(n, V, E) {
+  if (n.f.k === "name") {
+    const name = n.f.v;
+    const def = nmcLookupRaw(V, NMC_MACRO_PREFIX + name);
+    const { args, kw } = nmcEvArgs(n, V, E);
+    if (def) return nmcInvokeMacro(name, def, args, kw, V, E, null);
+    if (name === "caller") throw new Error(`caller() → ${_t("hors d'un bloc call")}`);
+    return nmcFunc(name, args, kw, V, E);
+  }
+  if (n.f.k === "attr") {
+    const o = nmcEv(n.f.o, V, E);
+    const { args, kw } = nmcEvArgs(n, V, E);
+    return nmcMethod(o, n.f.name, args, kw, E);
+  }
+  throw new Error(_t("appel invalide"));
+}
+
+// Positionnels puis kwargs, défauts évalués dans le scope de l'appelant.
+// `def.scope` (blocs {% call %}) : le corps de caller() s'évalue dans le scope du site d'appel.
+function nmcInvokeMacro(name, def, args, kw, V, E, callerDef) {
+  kw = Object.assign({}, kw);
+  const child = Object.create(def.scope || V);
+  def.params.forEach((p, i) => {
+    if (Object.prototype.hasOwnProperty.call(kw, p.name)) { child[p.name] = kw[p.name]; delete kw[p.name]; }
+    else if (i < args.length) child[p.name] = args[i];
+    else child[p.name] = p.def ? nmcEv(p.def, V, E) : "";
+  });
+  const unknown = Object.keys(kw);
+  if (unknown.length) E.warn(`${name}() → ${_t("argument inconnu")}${_sep()}${unknown.join(", ")}`);
+  // own-property : un caller() d'un {% call %} englobant reste masqué
+  child[NMC_MACRO_PREFIX + "caller"] = callerDef || undefined;
+  const brk = E.ctx.brk;
+  try { return new NmcSafe(nmcRenderNodes(def.body, E.hass, child, E.errs, E.ctx)); }
+  finally { E.ctx.brk = brk; }
+}
+
+const _nmcArgNum = (a) => a.map(nmcNum);
+function nmcToDT(v, utc) {
+  if (v instanceof NmcSafe) v = v.s;
+  if (v instanceof NmcDT) return v;
+  if (typeof v === "number" && isFinite(v)) return new NmcDT(v * 1000, utc);
+  if (typeof v === "string") {
+    if (_nmcNumRe.test(v)) return new NmcDT(parseFloat(v) * 1000, utc);
+    const ms = nmcParseDate(v);
+    if (!isNaN(ms)) return new NmcDT(ms, utc);
+  }
+  return null;
+}
+function nmcAsTimestamp(v, d) {
+  if (v instanceof NmcSafe) v = v.s;
+  if (v instanceof NmcDT) return v.ms / 1000;
+  if (typeof v === "number") return v;
+  if (typeof v === "string") {
+    const ms = nmcParseDate(v);
+    if (!isNaN(ms)) return ms / 1000;
+    if (_nmcNumRe.test(v)) return parseFloat(v);
+  }
+  return d !== undefined ? d : 0;
+}
+// Algorithme get_age de HA (relative_time).
+function nmcRelTime(v) {
+  const dt = nmcToDT(v instanceof NmcSafe ? v.s : v, false);
+  if (!dt || typeof v === "number") return v;
+  const now = Date.now();
+  if (now < dt.ms) return v;
+  const fmt = (n, u) => (n === 1 ? `1 ${u}` : `${n} ${u}s`);
+  const total = Math.floor((now - dt.ms) / 1000);
+  let day = Math.floor(total / 86400), sec = total % 86400;
+  const year = Math.floor(day / 365);
+  day %= 365;
+  if (year > 0) return fmt(year, "year");
+  const month = Math.floor(day / 30);
+  day %= 30;
+  if (month > 0) return fmt(month, "month");
+  if (day > 0) return fmt(day, "day");
+  const hour = Math.floor(sec / 3600);
+  sec %= 3600;
+  if (hour > 0) return fmt(hour, "hour");
+  const minute = Math.floor(sec / 60);
+  if (minute > 0) return fmt(minute, "minute");
+  return fmt(sec % 60, "second");
+}
+function nmcStateObj(E, id) {
+  if (id && typeof id === "object" && id.entity_id) id = id.entity_id;
+  return E.hass.states ? E.hass.states[nmcToStr(id)] : undefined;
+}
+function nmcExpand(args, E) {
+  const seen = new Set(), out = [];
+  const walk = (x, depth) => {
+    if (x instanceof NmcSafe) x = x.s;
+    if (Array.isArray(x)) return x.forEach((y) => walk(y, depth));
+    if (x instanceof NmcDomain) return x.list().forEach((y) => walk(y, depth));
+    const s = nmcStateObj(E, x);
+    if (!s || seen.has(s.entity_id)) return;
+    seen.add(s.entity_id);
+    const members = s.attributes && s.attributes.entity_id;
+    if (Array.isArray(members) && depth < 8) members.forEach((m) => walk(m, depth + 1));
+    else out.push(nmcWrapState(s));
+  };
+  args.forEach((a) => walk(a, 0));
+  return out.sort((a, b) => (a.entity_id < b.entity_id ? -1 : 1));
+}
+function nmcMinMax(isMax, args) {
+  const l = args.length === 1 && (Array.isArray(args[0]) || args[0] instanceof NmcDomain)
+    ? (Array.isArray(args[0]) ? args[0] : args[0].list()) : args;
+  if (!l.length) return NMC_UNDEF;
+  return l.reduce((best, x) => ((isMax ? nmcOrd(x, best) > 0 : nmcOrd(x, best) < 0) ? x : best), l[0]);
+}
+
+function nmcFunc(name, a, kw, V, E) {
+  switch (name) {
+    case "range": {
+      let [s, e, st] = a.length >= 2 ? _nmcArgNum(a) : [0, nmcNum(a[0])];
+      st = st == null ? 1 : Math.trunc(st) || 1;
+      s = Math.trunc(s); e = Math.trunc(e);
+      const out = [];
+      for (let i = s; st > 0 ? i < e : i > e; i += st) {
+        if (out.length >= NMC_MAX_TEMPLATE_ITERATIONS) {
+          E.warn(`range → ${_t("itérations limitées à")} ${NMC_MAX_TEMPLATE_ITERATIONS}`);
+          break;
+        }
+        out.push(i);
+      }
+      return out;
+    }
+    case "states": {
+      const s = nmcStateObj(E, a[0]);
+      return s ? s.state : "";
+    }
+    case "is_state": {
+      const s = nmcStateObj(E, a[0]);
+      if (!s) return 0;
+      const w = a[1] instanceof NmcSafe ? a[1].s : a[1];
+      return (Array.isArray(w) ? w.some((x) => nmcToStr(x) === s.state) : nmcToStr(w) === s.state) ? true : false;
+    }
+    case "state_attr": {
+      const s = nmcStateObj(E, a[0]);
+      const v = s && s.attributes ? s.attributes[nmcToStr(a[1])] : undefined;
+      return v == null || !Object.prototype.hasOwnProperty.call(s.attributes, nmcToStr(a[1])) ? "" : v;
+    }
+    case "is_state_attr": {
+      const s = nmcStateObj(E, a[0]);
+      return !!(s && s.attributes && nmcEq(s.attributes[nmcToStr(a[1])], a[2]));
+    }
+    case "has_value": {
+      const s = nmcStateObj(E, a[0]);
+      return !!(s && s.state !== "unknown" && s.state !== "unavailable");
+    }
+    case "as_timestamp": return nmcAsTimestamp(a[0], a.length > 1 ? a[1] : kw.default);
+    case "now": return new NmcDT(Date.now(), false);
+    case "utcnow": return new NmcDT(Date.now(), true);
+    case "as_datetime": {
+      const dt = nmcToDT(a[0], false);
+      return dt || (a.length > 1 ? a[1] : kw.default !== undefined ? kw.default : NMC_UNDEF);
+    }
+    case "as_local": {
+      const dt = nmcToDT(a[0], false);
+      return dt ? new NmcDT(dt.ms, false) : NMC_UNDEF;
+    }
+    case "today_at": {
+      const m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(nmcToStr(a[0] == null || a[0] === NMC_UNDEF ? "00:00" : a[0]).trim());
+      if (!m) throw new Error(`today_at → ${_t("heure invalide")}`);
+      const d = new Date();
+      d.setHours(+m[1], +m[2], +(m[3] || 0), 0);
+      return new NmcDT(d.getTime(), false);
+    }
+    case "timedelta": {
+      const g = (k) => nmcNum(kw[k] !== undefined ? kw[k] : 0);
+      const pos = _nmcArgNum(a);
+      return new NmcTD((pos[0] || g("days")) * 86400 + (pos[1] || g("seconds")) + g("minutes") * 60 +
+        g("hours") * 3600 + g("weeks") * 604800 + g("milliseconds") / 1000);
+    }
+    case "relative_time": return nmcRelTime(a[0]);
+    case "expand": return nmcExpand(a, E);
+    case "iif": {
+      const t = a.length > 1 ? a[1] : 1, f = a.length > 2 ? a[2] : 0;
+      if (a.length > 3 && (a[0] == null || a[0] === NMC_UNDEF)) return a[3];
+      return nmcTruthy(a[0]) ? t : f;
+    }
+    case "max":
+    case "min": return nmcMinMax(name === "max", a);
+    case "float": case "int": case "bool": case "string": case "str": case "list":
+    case "average":
+      return nmcFilter(name === "str" ? "string" : name, a[0], a.slice(1), kw, E);
+    case "dict": {
+      const o = {};
+      if (a[0] && typeof a[0] === "object") {
+        if (Array.isArray(a[0])) for (const p of a[0]) { if (Array.isArray(p)) o[nmcToStr(p[0])] = p[1]; }
+        else if (nmcIsPlain(a[0])) Object.assign(o, a[0]);
+      }
+      return Object.assign(o, kw);
+    }
+    case "namespace": return Object.assign({}, a[0] && nmcIsPlain(a[0]) ? a[0] : {}, kw);
+    case "zip": {
+      const ls = a.map((x) => (Array.isArray(x) ? x : []));
+      const n = ls.length ? Math.min(...ls.map((x) => x.length)) : 0;
+      return Array.from({ length: n }, (_, i) => ls.map((x) => x[i]));
+    }
+    case "len": return nmcFilter("length", a[0], [], {}, E);
+    case "abs": return Math.abs(nmcNum(a[0]));
+  }
+  if (Object.prototype.hasOwnProperty.call(nmcMathFns, name)) return _nmcFin(nmcMathFns[name](_nmcArgNum(a)));
+  throw new Error(`${name}() → ${_t("fonction inconnue")}`);
+}
+
+const NMC_STR_METHODS = new Set(["upper", "lower", "strip", "lstrip", "rstrip", "replace", "split",
+  "startswith", "endswith", "title", "capitalize", "count", "find", "join", "format", "zfill",
+  "isdigit", "isnumeric", "isalpha", "isalnum", "isspace", "islower", "isupper", "ljust", "rjust",
+  "center", "rsplit", "splitlines", "index", "rfind", "removeprefix", "removesuffix", "swapcase", "casefold"]);
+function nmcStrip(s, chars, l, r) {
+  if (chars == null || chars === NMC_UNDEF) return l && r ? s.trim() : l ? s.replace(/^\s+/, "") : s.replace(/\s+$/, "");
+  const set = nmcToStr(chars);
+  let a = 0, b = s.length;
+  if (l) while (a < b && set.includes(s[a])) a++;
+  if (r) while (b > a && set.includes(s[b - 1])) b--;
+  return s.slice(a, b);
+}
+function nmcPyFormat(s, a, kw) {
+  let auto = 0;
+  return s.replace(/\{\{|\}\}|\{([^{}]*)\}/g, (m, f) => {
+    if (m === "{{") return "{";
+    if (m === "}}") return "}";
+    const [key, spec] = f.split(":");
+    const v = key === "" ? a[auto++] : /^\d+$/.test(key) ? a[+key] : nmcPath(kw, key);
+    if (spec) {
+      const mm = /^(0?)(\d*)(?:\.(\d+))?([fdsx%]?)$/.exec(spec);
+      if (mm) {
+        let out = mm[4] === "f" || mm[3] ? nmcNum(v).toFixed(mm[3] ? +mm[3] : 6)
+          : mm[4] === "d" ? String(Math.trunc(nmcNum(v))) : mm[4] === "x" ? Math.trunc(nmcNum(v)).toString(16)
+          : mm[4] === "%" ? (nmcNum(v) * 100).toFixed(mm[3] ? +mm[3] : 6) + "%" : nmcToStr(v);
+        if (mm[2]) out = out.padStart(+mm[2], mm[1] ? "0" : " ");
+        return out;
+      }
+    }
+    return nmcToStr(v);
+  });
+}
+function nmcMethod(o, name, a, kw, E) {
+  if (o === NMC_UNDEF) return NMC_UNDEF;
+  if (o instanceof NmcLoop && name === "cycle") return a.length ? a[o.index0 % a.length] : NMC_UNDEF;
+  if (o instanceof NmcDT) {
+    const p = nmcDtParts(o);
+    switch (name) {
+      case "weekday": return (p.wd + 6) % 7;
+      case "isoweekday": return p.wd || 7;
+      case "timestamp": return o.ms / 1000;
+      case "isoformat": return nmcDtStr(o, "T");
+      case "strftime": return nmcStrftime(new Date(o.ms), nmcToStr(a[0]), E.hass.language, o.utc);
+      case "date": return `${p.y}-${_p2(p.mo)}-${_p2(p.d)}`;
+      case "astimezone": case "replace": return o;
+    }
+  }
+  if (o instanceof NmcTD && name === "total_seconds") return o.s;
+  if (o instanceof NmcSafe) o = o.s;
+  if (typeof o === "string" && NMC_STR_METHODS.has(name)) {
+    const s0 = a[0] === undefined || a[0] === NMC_UNDEF ? undefined : a[0];
+    switch (name) {
+      case "upper": return o.toUpperCase();
+      case "lower": case "casefold": return o.toLowerCase();
+      case "swapcase": return o.replace(/./g, (c) => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase()));
+      case "strip": return nmcStrip(o, s0, true, true);
+      case "lstrip": return nmcStrip(o, s0, true, false);
+      case "rstrip": return nmcStrip(o, s0, false, true);
+      case "replace": {
+        const from = nmcToStr(s0), to = nmcToStr(a[1]);
+        let n = a.length > 2 ? Math.trunc(nmcNum(a[2])) : -1;
+        if (n < 0) return o.split(from).join(to);
+        let out = o;
+        let idx = 0;
+        for (; n > 0; n--) {
+          const k = out.indexOf(from, idx);
+          if (k < 0) break;
+          out = out.slice(0, k) + to + out.slice(k + from.length);
+          idx = k + to.length;
+        }
+        return out;
+      }
+      case "split": case "rsplit": {
+        const max = a.length > 1 ? Math.trunc(nmcNum(a[1])) : -1;
+        let parts = s0 == null || s0 === null ? o.trim().split(/\s+/).filter((x) => x !== "") : o.split(nmcToStr(s0));
+        if (max >= 0 && parts.length > max + 1) {
+          const sep = s0 == null ? " " : nmcToStr(s0);
+          parts = name === "split" ? parts.slice(0, max).concat([parts.slice(max).join(sep)])
+            : [parts.slice(0, parts.length - max).join(sep)].concat(parts.slice(parts.length - max));
+        }
+        return parts;
+      }
+      case "splitlines": return o.split(/\r?\n/);
+      case "startswith":
+      case "endswith": {
+        const l = Array.isArray(s0) ? s0 : [s0];
+        return l.some((x) => (name === "startswith" ? o.startsWith(nmcToStr(x)) : o.endsWith(nmcToStr(x)))) ? true : false;
+      }
+      case "removeprefix": return o.startsWith(nmcToStr(s0)) ? o.slice(nmcToStr(s0).length) : o;
+      case "removesuffix": { const x = nmcToStr(s0); return x && o.endsWith(x) ? o.slice(0, -x.length) : o; }
+      case "title": return o.toLowerCase().replace(/(^|[^A-Za-zÀ-ÿ])([A-Za-zÀ-ÿ])/g, (m, p, c) => p + c.toUpperCase());
+      case "capitalize": return o.charAt(0).toUpperCase() + o.slice(1).toLowerCase();
+      case "count": { const x = nmcToStr(s0); return x ? o.split(x).length - 1 : o.length + 1; }
+      case "find": return o.indexOf(nmcToStr(s0));
+      case "rfind": return o.lastIndexOf(nmcToStr(s0));
+      case "index": { const k = o.indexOf(nmcToStr(s0)); if (k < 0) throw new Error(`index → ${_t("introuvable")}`); return k; }
+      case "join": return (Array.isArray(s0) ? s0 : s0 instanceof NmcDomain ? s0.list() : []).map(nmcToStr).join(o);
+      case "format": return nmcPyFormat(o, a, kw);
+      case "zfill": return nmcFilter("zfill", o, a, kw, E);
+      case "center": return nmcFilter("center", o, a, kw, E);
+      case "ljust": return o.padEnd(Math.trunc(nmcNum(s0)), a[1] != null ? nmcToStr(a[1]) : " ");
+      case "rjust": return o.padStart(Math.trunc(nmcNum(s0)), a[1] != null ? nmcToStr(a[1]) : " ");
+      case "isdigit": case "isnumeric": return /^\d+$/.test(o) ? true : false;
+      case "isalpha": return /^[A-Za-zÀ-ÿ]+$/.test(o) ? true : false;
+      case "isalnum": return /^[A-Za-zÀ-ÿ0-9]+$/.test(o) ? true : false;
+      case "isspace": return /^\s+$/.test(o) ? true : false;
+      case "islower": return o === o.toLowerCase() && o !== o.toUpperCase() ? true : false;
+      case "isupper": return o === o.toUpperCase() && o !== o.toLowerCase() ? true : false;
+    }
+  }
+  if (Array.isArray(o)) {
+    switch (name) {
+      case "append":
+        if (o.length >= NMC_MAX_TEMPLATE_ITERATIONS) throw new Error(_t("liste trop longue"));
+        o.push(a[0]); return NMC_UNDEF;
+      case "extend":
+        for (const x of Array.isArray(a[0]) ? a[0] : []) { if (o.length >= NMC_MAX_TEMPLATE_ITERATIONS) break; o.push(x); }
+        return NMC_UNDEF;
+      case "insert": o.splice(Math.trunc(nmcNum(a[0])), 0, a[1]); return NMC_UNDEF;
+      case "pop": {
+        if (!o.length) return NMC_UNDEF;
+        let i = a.length ? Math.trunc(nmcNum(a[0])) : o.length - 1;
+        if (i < 0) i += o.length;
+        return o.splice(i, 1)[0];
+      }
+      case "index": { const i = o.findIndex((x) => nmcEq(x, a[0])); if (i < 0) throw new Error(`index → ${_t("introuvable")}`); return i; }
+      case "count": return o.filter((x) => nmcEq(x, a[0])).length;
+    }
+  }
+  if (nmcIsPlain(o)) {
+    switch (name) {
+      case "get": { const v = nmcAttr(o, nmcToStr(a[0])); return v === NMC_UNDEF ? (a.length > 1 ? a[1] : null) : v; }
+      case "items": return Object.keys(o).map((k) => nmcTup([k, o[k]]));
+      case "keys": return Object.keys(o);
+      case "values": return Object.values(o);
+      case "update": if (nmcIsPlain(a[0])) Object.assign(o, a[0]); Object.assign(o, kw); return NMC_UNDEF;
+    }
+  }
+  throw new Error(`.${name}() → ${_t("méthode inconnue")}`);
+}
+
+/* ── Utilitaires conservés de l'ancien moteur ── */
+function nmcSplitTop(s, sep) {
+  const out = [];
+  let depth = 0, inStr = "", start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) { if (c === inStr) inStr = ""; continue; }
+    if (c === '"' || c === "'") { inStr = c; continue; }
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === sep && depth === 0) { out.push(s.slice(start, i)); start = i + 1; }
+  }
+  out.push(s.slice(start));
+  return out;
+}
+
+// utc : lit les champs UTC (utcnow(), timestamp_utc) au lieu de l'heure locale.
+function nmcStrftime(d, fmt, lang, utc) {
+  const p2 = (n) => String(n).padStart(2, "0");
+  const g = (k) => d[(utc ? "getUTC" : "get") + k]();
+  const name = (opts) => {
+    if (utc) opts = Object.assign({ timeZone: "UTC" }, opts);
+    try { return new Intl.DateTimeFormat(lang || "en", opts).format(d); }
+    catch (e) { return new Intl.DateTimeFormat("en", opts).format(d); }
+  };
+  const Y = g("FullYear"), Mo = g("Month"), D = g("Date"), H = g("Hours"), wd = g("Day");
+  const h12 = H % 12 || 12;
+  const yday = Math.round((Date.UTC(Y, Mo, D) - Date.UTC(Y, 0, 1)) / 864e5) + 1;
+  const off = utc ? 0 : -d.getTimezoneOffset();
+  const map = {
+    H: () => p2(H), I: () => p2(h12), M: () => p2(g("Minutes")), S: () => p2(g("Seconds")),
+    f: () => String(g("Milliseconds") * 1000).padStart(6, "0"),
+    p: () => (H < 12 ? "AM" : "PM"),
+    d: () => p2(D), e: () => String(D).padStart(2, " "), m: () => p2(Mo + 1),
+    y: () => p2(Y % 100), Y: () => String(Y), j: () => String(yday).padStart(3, "0"),
+    a: () => name({ weekday: "short" }), A: () => name({ weekday: "long" }),
+    b: () => name({ month: "short" }), B: () => name({ month: "long" }),
+    u: () => String(wd || 7), w: () => String(wd),
+    z: () => nmcTzStr(off, false), Z: () => (utc ? "UTC" : ""),
+    "%": () => "%",
+  };
+  return fmt.replace(/%(-?)(.)/g, (all, nopad, c) => {
+    if (!map[c]) return all;
+    const v = map[c]();
+    return nopad && /^[0 ]\d/.test(v) ? v.replace(/^[0 ]+(?=\d)/, "") : v;
+  });
+}
+
+const nmcMathFns = {
+  log:   (a) => (a[1] ? Math.log(a[0]) / Math.log(a[1]) : (a[0] > 0 ? Math.log(a[0]) : 0)), // log(x) = ln ; log(x,b) = base b
+  ln:    (a) => (a[0] > 0 ? Math.log(a[0]) : 0),
+  log10: (a) => (a[0] > 0 ? Math.log10(a[0]) : 0),
+  log2:  (a) => (a[0] > 0 ? Math.log2(a[0]) : 0),
+  exp:   (a) => Math.exp(a[0]),
+  sqrt:  (a) => Math.sqrt(Math.max(0, a[0])),
+  abs:   (a) => Math.abs(a[0]),
+  floor: (a) => Math.floor(a[0]),
+  ceil:  (a) => Math.ceil(a[0]),
+  round: (a) => nmcRoundEven(a[0], a[1] != null ? Math.max(0, Math.min(100, a[1] | 0)) : 0), // égalité → pair, comme |round
+  sin:   (a) => Math.sin(a[0]),
+  cos:   (a) => Math.cos(a[0]),
+  tan:   (a) => Math.tan(a[0]),
+  asin:  (a) => Math.asin(a[0]),
+  acos:  (a) => Math.acos(a[0]),
+  atan:  (a) => Math.atan(a[0]),
+  pow:   (a) => Math.pow(a[0], a[1] == null ? 2 : a[1]),
+  atan2: (a) => Math.atan2(a[0], a[1]),
+  hypot: (a) => Math.hypot(a[0], a[1]),
+};
+
+/* ── Filtres ── */
+const _nmcSeq = (r) => (r instanceof NmcSafe ? Array.from(r.s) : Array.isArray(r) ? r
+  : r instanceof NmcDomain || r instanceof NmcStatesRoot ? r.list()
+  : typeof r === "string" ? Array.from(r) : nmcIsPlain(r) ? Object.keys(r) : []);
+const _nmcKey = (at) => (x) => (at == null || at === NMC_UNDEF ? x : nmcPath(x, nmcToStr(at)));
+const _nmcIsEmpty = (r) => r === NMC_UNDEF || r == null || r === "" || r === "None" || r === "unknown" || r === "unavailable";
+// Python : re.sub/re.match → RegExp JS (groupes nommés, références \1 / \g<n>).
+function nmcPyRe(p, flags) {
+  return new RegExp(nmcToStr(p).replace(/\(\?P</g, "(?<").replace(/\(\?P=(\w+)\)/g, "\\k<$1>"), flags);
+}
+const nmcPyRepl = (s) => nmcToStr(s).replace(/\\g<(\w+)>/g, (m, n) => (/^\d+$/.test(n) ? "$" + n : "$<" + n + ">"))
+  .replace(/\\(\d)/g, "$$$1");
+function nmcPrintf(fmtStr, args) {
+  let ai = 0;
+  return nmcToStr(fmtStr).replace(/%([+\-0 ]*)(\d+)?(?:\.(\d+))?([sdifxXeE%])/g, (m, fl, w, prec, conv) => {
+    if (conv === "%") return "%";
+    const arg = args[ai++];
+    if (arg === undefined) return m;
+    let o;
+    if (conv === "s") o = nmcToStr(arg);
+    else {
+      const num = nmcNum(arg);
+      if (conv === "d" || conv === "i") o = String(Math.trunc(num));
+      else if (conv === "x") o = Math.trunc(num).toString(16);
+      else if (conv === "X") o = Math.trunc(num).toString(16).toUpperCase();
+      else if (conv === "e" || conv === "E") {
+        o = num.toExponential(prec !== undefined ? +prec : 6).replace(/e([+-])(\d)$/, "e$10$2");
+        if (conv === "E") o = o.toUpperCase();
+      } else o = num.toFixed(prec !== undefined ? +prec : 6);
+      if (fl.includes("+") && num >= 0) o = "+" + o;
+      else if (fl.includes(" ") && num >= 0) o = " " + o;
+    }
+    const width = w ? +w : 0;
+    if (o.length < width) o = fl.includes("-") ? o.padEnd(width, " ") : o.padStart(width, fl.includes("0") && conv !== "s" ? "0" : " ");
+    return o;
+  });
+}
+function nmcToJson(v, depth) {
+  if (depth > 20) return "null";
+  if (v instanceof NmcSafe) v = v.s;
+  if (v === NMC_UNDEF || v == null) return "null";
+  if (v instanceof NmcDT) return JSON.stringify(nmcDtStr(v, "T"));
+  if (v instanceof NmcTD) return JSON.stringify(nmcTdStr(v));
+  if (v instanceof NmcDomain || v instanceof NmcStatesRoot) v = v.list();
+  if (Array.isArray(v)) return "[" + v.map((x) => nmcToJson(x, depth + 1)).join(", ") + "]";
+  if (typeof v === "object") return "{" + Object.keys(v).map((k) => JSON.stringify(k) + ": " + nmcToJson(v[k], depth + 1)).join(", ") + "}";
+  if (typeof v === "number") return isFinite(v) ? String(v) : "null";
+  return JSON.stringify(v);
+}
+function nmcFromJson(v) {
+  if (v === NMC_UNDEF || v == null) return v;
+  const conv = (x) => (x === null ? null : Array.isArray(x) ? x.map(conv)
+    : typeof x === "object" ? Object.fromEntries(Object.entries(x).map(([k, y]) => [k, conv(y)])) : x);
+  return conv(JSON.parse(nmcToStr(v)));
+}
+
+function nmcFilter(name, r, a, kw, E) {
+  const a0 = a[0], has = (i, k) => (k && kw[k] !== undefined) || a.length > i;
+  const arg = (i, k, d) => (k && kw[k] !== undefined ? kw[k] : a.length > i ? a[i] : d);
+  const str = () => nmcToStr(r);
+  switch (name) {
+    case "round": {
+      const n = Math.trunc(nmcNum(arg(0, "precision", 0)));
+      const method = nmcToStr(arg(1, "method", "common"));
+      const num = typeof r === "number" ? r : parseFloat(r instanceof NmcSafe ? r.s : r);
+      if (isNaN(num)) return r;
+      // Valeur = forgiving_round de HA (round() Python : égalité exacte → pair). Écriture : n
+      // décimales fixes (1.20 kW, 0.00 €) — HA écrirait 1.2 ; gardé pour l'affichage des cards.
+      const p = Math.pow(10, n);
+      let v;
+      if (method === "floor" || method === "ceil") v = Math[method](num * p) / p;
+      else if (method === "half") v = nmcRoundEven(num * 2, 0) / 2;
+      else v = n >= 0 ? nmcRoundEven(num, Math.min(n, 100)) : nmcRoundEven(num / Math.pow(10, -n), 0) * Math.pow(10, -n);
+      if (n === 0) return Math.trunc(v);
+      return Math.abs(v) < 1e21 ? v.toFixed(Math.max(0, Math.min(100, n))) : v;
+    }
+    case "float": {
+      const n = typeof r === "number" ? r : parseFloat(r instanceof NmcSafe ? r.s : r);
+      return isNaN(n) ? arg(0, "default", 0) : n;
+    }
+    case "int": {
+      if (typeof r === "number") return isFinite(r) ? Math.trunc(r) : arg(0, "default", 0);
+      const base = Math.trunc(nmcNum(arg(1, "base", 10))) || 10;
+      const s = nmcToStr(r).trim();
+      const n = base === 10 ? Math.trunc(parseFloat(s)) : parseInt(s, base);
+      return isNaN(n) ? arg(0, "default", 0) : n;
+    }
+    case "bool": {
+      const v = r instanceof NmcSafe ? r.s : r;
+      if (typeof v === "boolean") return v;
+      const s = nmcToStr(v).toLowerCase().trim();
+      if (["true", "yes", "on", "enable", "1"].includes(s) || (typeof v === "number" && v !== 0)) return true;
+      if (["false", "no", "off", "disable", "0", "none", ""].includes(s)) return false;
+      return a.length ? a[0] : nmcTruthy(v);
+    }
+    case "abs": return Math.abs(nmcNum(r));
+    case "clamp": {
+      let n = nmcNum(r);
+      const lo = a.length > 0 ? nmcNum(a[0]) : NaN, hi = a.length > 1 ? nmcNum(a[1]) : NaN;
+      if (!isNaN(lo) && n < lo) n = lo;
+      if (!isNaN(hi) && n > hi) n = hi;
+      return n;
+    }
+    case "multiply": return _nmcFin(nmcNum(r) * nmcNum(a0));
+    case "format": return nmcPrintf(r, a.length ? a : Object.values(kw));
+    case "zfill": {
+      const w = Math.trunc(nmcNum(a0)), s = str();
+      return /^[-+]/.test(s) ? s[0] + s.slice(1).padStart(Math.max(0, w - 1), "0") : s.padStart(w, "0");
+    }
+    case "upper": return str().toUpperCase();
+    case "lower": return str().toLowerCase();
+    case "title": return str().replace(/\b\w/g, (c) => c.toUpperCase());
+    case "capitalize": return str().charAt(0).toUpperCase() + str().slice(1).toLowerCase();
+    case "trim": return a.length ? nmcStrip(str(), a0, true, true) : str().trim();
+    case "string": return r === null ? "None" : nmcToStr(r);
+    case "replace": {
+      const from = nmcToStr(a0), to = nmcToStr(a[1]);
+      const n = a.length > 2 ? Math.trunc(nmcNum(a[2])) : -1;
+      return n >= 0 ? nmcMethod(str(), "replace", [from, to, n], {}, E) : str().split(from).join(to);
+    }
+    case "truncate": {
+      const n = Math.trunc(nmcNum(arg(0, "length", 255))), s = str();
+      const kill = nmcTruthy(arg(1, "killwords", false)), end = nmcToStr(arg(2, "end", "..."));
+      const lee = Math.trunc(nmcNum(arg(3, "leeway", 5)));
+      if (s.length <= n + lee) return s;
+      const cut = s.slice(0, Math.max(0, n - end.length));
+      if (kill) return cut + end;
+      const sp = cut.lastIndexOf(" ");
+      return (sp >= 0 ? cut.slice(0, sp) : cut) + end;
+    }
+    case "center": {
+      const w = Math.trunc(nmcNum(arg(0, "width", 80))), s = str();
+      if (s.length >= w) return s;
+      const left = Math.floor((w - s.length) / 2);
+      return " ".repeat(left) + s + " ".repeat(w - s.length - left);
+    }
+    case "wordcount": return (str().match(/\w+/g) || []).length;
+    case "striptags": return str().replace(/<!--[\s\S]*?-->|<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+    case "indent": {
+      const w = arg(0, "width", 4), first = nmcTruthy(arg(1, "first", false)), blank = nmcTruthy(arg(2, "blank", false));
+      const pad = typeof w === "string" ? w : " ".repeat(Math.max(0, Math.min(200, Math.trunc(nmcNum(w)))));
+      return str().split("\n").map((l, i) => ((i > 0 || first) && (blank || l.trim() !== "") ? pad + l : l)).join("\n");
+    }
+    case "slice": {
+      const seq = _nmcSeq(r), n = Math.max(1, Math.min(NMC_MAX_TEMPLATE_ITERATIONS, Math.trunc(nmcNum(a0)) || 1));
+      const fill = arg(1, "fill_with", undefined);
+      const per = Math.floor(seq.length / n), extra = seq.length % n, out = [];
+      let offset = 0;
+      for (let k = 0; k < n; k++) {
+        const start = offset + k * per;
+        if (k < extra) offset++;
+        const col = seq.slice(start, offset + (k + 1) * per);
+        if (fill !== undefined && fill !== null && fill !== NMC_UNDEF && k >= extra) col.push(fill);
+        out.push(col);
+      }
+      return out;
+    }
+    case "batch": {
+      const seq = _nmcSeq(r), n = Math.max(1, Math.trunc(nmcNum(a0)) || 1), fill = arg(1, "fill_with", undefined), out = [];
+      for (let i = 0; i < seq.length; i += n) out.push(seq.slice(i, i + n));
+      if (fill !== undefined && fill !== NMC_UNDEF && out.length) while (out[out.length - 1].length < n) out[out.length - 1].push(fill);
+      return out;
+    }
+    case "default": case "d":
+      if (r === NMC_UNDEF || (nmcTruthy(arg(1, "boolean", false)) ? !nmcTruthy(r) : _nmcIsEmpty(r))) return a.length ? a0 : "";
+      return r;
+    case "length": case "count":
+      if (r instanceof NmcDomain || r instanceof NmcStatesRoot) return r.list().length;
+      if (Array.isArray(r)) return r.length;
+      if (nmcIsPlain(r)) return Object.keys(r).length;
+      return r == null || r === NMC_UNDEF ? 0 : str().length;
+    case "thousands": {
+      const sep = a.length ? nmcToStr(a0) : " ", parts = str().split(".");
+      parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, sep);
+      return parts.join(".");
+    }
+    case "first": { const s = _nmcSeq(r); return s.length ? s[0] : NMC_UNDEF; }
+    case "last": { const s = _nmcSeq(r); return s.length ? s[s.length - 1] : NMC_UNDEF; }
+    case "join": {
+      const at = arg(1, "attribute", null);
+      const s = Array.isArray(r) || r instanceof NmcDomain ? _nmcSeq(r) : null;
+      if (!s) return str();
+      const sep = a.length || kw.d !== undefined ? nmcToStr(arg(0, "d", "")) : "";
+      const parts = s.map(_nmcKey(at));
+      return parts.some((x) => x instanceof NmcSafe) && !_nmcRawOut
+        ? new NmcSafe(parts.map(nmcEscOut).join(nmcEscOut(sep))) : parts.map(nmcToStr).join(sep);
+    }
+    case "reverse": return Array.isArray(r) || nmcIsPlain(r) || r instanceof NmcDomain ? _nmcSeq(r).slice().reverse() : Array.from(str()).reverse().join("");
+    case "sum": {
+      const f = _nmcKey(arg(0, "attribute", null));
+      return _nmcSeq(r).reduce((s, x) => s + nmcNum(f(x)), nmcNum(arg(1, "start", 0)));
+    }
+    case "average": case "mean": {
+      const s = _nmcSeq(r).map(nmcNum);
+      return s.length ? s.reduce((x, y) => x + y, 0) / s.length : a.length ? a0 : 0;
+    }
+    case "min": case "max": {
+      const s = _nmcSeq(r), f = _nmcKey(kw.attribute);
+      if (!s.length) return NMC_UNDEF;
+      return s.reduce((b, x) => ((name === "min" ? nmcOrd(f(x), f(b)) < 0 : nmcOrd(f(x), f(b)) > 0) ? x : b), s[0]);
+    }
+    case "sort": {
+      const rev = nmcTruthy(arg(0, "reverse", false)), cs = nmcTruthy(arg(1, "case_sensitive", false));
+      const f = _nmcKey(arg(2, "attribute", null));
+      const norm = (v) => (!cs && typeof v === "string" ? v.toLowerCase() : v);
+      return _nmcSeq(r).slice().sort((x, y) => { const c = nmcOrd(norm(f(x)), norm(f(y))); return rev ? -c : c; });
+    }
+    case "unique": {
+      const f = _nmcKey(arg(1, "attribute", null)), cs = nmcTruthy(arg(0, "case_sensitive", false)), seen = [], out = [];
+      for (const x of _nmcSeq(r)) {
+        let k = f(x);
+        if (!cs && typeof k === "string") k = k.toLowerCase();
+        if (!seen.some((s) => nmcEq(s, k))) { seen.push(k); out.push(x); }
+      }
+      return out;
+    }
+    case "dictsort": {
+      if (!nmcIsPlain(r)) return [];
+      const byVal = nmcToStr(arg(1, "by", "key")) === "value", rev = nmcTruthy(arg(2, "reverse", false));
+      return Object.keys(r).map((k) => nmcTup([k, r[k]])).sort((x, y) => { const c = nmcOrd(x[byVal ? 1 : 0], y[byVal ? 1 : 0]); return rev ? -c : c; });
+    }
+    case "items": return nmcIsPlain(r) ? Object.keys(r).map((k) => nmcTup([k, r[k]])) : [];
+    case "groupby": {
+      const f = _nmcKey(arg(0, "attribute", null)), groups = [];
+      for (const x of _nmcSeq(r)) {
+        const k = f(x);
+        let g = groups.find((y) => nmcEq(y.grouper, k));
+        if (!g) { g = [k, []]; g.grouper = k; g.list = g[1]; groups.push(g); }
+        g[1].push(x);
+      }
+      return groups.sort((x, y) => nmcOrd(x.grouper, y.grouper));
+    }
+    case "map": {
+      const s = _nmcSeq(r);
+      if (kw.attribute !== undefined) {
+        const f = _nmcKey(kw.attribute);
+        return s.map((x) => { const v = f(x); return v === NMC_UNDEF && kw.default !== undefined ? kw.default : v; });
+      }
+      if (!a.length) return s;
+      return s.map((x) => nmcFilter(nmcToStr(a0), x, a.slice(1), {}, E));
+    }
+    case "selectattr": case "rejectattr": case "select": case "reject": {
+      const isAttr = name.endsWith("attr"), keep = name.startsWith("select");
+      const f = isAttr ? _nmcKey(a0) : (x) => x, rest = isAttr ? a.slice(1) : a;
+      return _nmcSeq(r).filter((x) => {
+        const v = f(x);
+        const ok = rest.length ? nmcTest(nmcToStr(rest[0]), v, rest.slice(1), {}, E) : nmcTruthy(v);
+        return ok === keep;
+      });
+    }
+    case "list":
+      if (r == null || r === NMC_UNDEF) return [];
+      if (Array.isArray(r) || typeof r === "string" || r instanceof NmcSafe || nmcIsPlain(r) || r instanceof NmcDomain || r instanceof NmcStatesRoot)
+        return _nmcSeq(r).slice();
+      return [r];
+    case "safe": return r instanceof NmcSafe ? r : new NmcSafe(nmcToStr(r));
+    case "e": case "escape": case "forceescape":
+      return r instanceof NmcSafe && name !== "forceescape" ? r : new NmcSafe(nmcEscStr(nmcToStr(r)));
+    case "urlencode":
+      return nmcIsPlain(r) ? Object.keys(r).map((k) => encodeURIComponent(k) + "=" + encodeURIComponent(nmcToStr(r[k]))).join("&") : encodeURIComponent(str());
+    case "tojson": case "to_json":
+      return new NmcSafe(nmcToJson(r, 0).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026").replace(/'/g, "\\u0027"));
+    case "from_json":
+      try { return nmcFromJson(r); } catch (e) { if (a.length) return a0; throw new Error(`from_json → ${e.message}`); }
+    case "attr": return nmcAttr(r, nmcToStr(a0));
+    case "contains": return nmcIn(a0, r) ? true : false;
+    case "is_number": return nmcTest("is_number", r, [], {}, E) ? true : false;
+    case "regex_replace": {
+      const re = nmcPyRe(arg(0, "find", ""), nmcTruthy(arg(2, "ignorecase", false)) ? "gi" : "g");
+      return str().replace(re, nmcPyRepl(arg(1, "replace", "")));
+    }
+    case "regex_match": case "regex_search": {
+      const src = nmcToStr(arg(0, "find", "")), ic = nmcTruthy(arg(1, "ignorecase", false)) ? "i" : "";
+      return nmcPyRe(name === "regex_match" ? "^(?:" + src + ")" : src, ic).test(str()) ? true : false;
+    }
+    case "regex_findall": {
+      const re = nmcPyRe(arg(0, "find", ""), nmcTruthy(arg(1, "ignorecase", false)) ? "gi" : "g"), out = [];
+      for (const m of str().matchAll(re)) {
+        out.push(m.length > 2 ? m.slice(1) : m.length === 2 ? m[1] : m[0]);
+        if (out.length >= NMC_MAX_TEMPLATE_ITERATIONS) break;
+      }
+      return out;
+    }
+    case "regex_findall_index": {
+      const l = nmcFilter("regex_findall", r, [arg(0, "find", "")], { ignorecase: arg(2, "ignorecase", false) }, E);
+      return nmcAttr(l, Math.trunc(nmcNum(arg(1, "index", 0))));
+    }
+    case "timestamp_custom": case "timestamp_local": case "timestamp_utc": {
+      const ts = nmcAsTimestamp(r, null);
+      if (ts == null || r === NMC_UNDEF || r === "" || (typeof r === "string" && !_nmcNumRe.test(r.trim()) && isNaN(nmcParseDate(r)))) {
+        const d = arg(name === "timestamp_custom" ? 2 : 0, "default", undefined);
+        if (d !== undefined) return d;
+        throw new Error(`${name} → ${_t("valeur invalide")}`);
+      }
+      const utc = name === "timestamp_utc" || (name === "timestamp_custom" && !nmcTruthy(arg(1, "local", true)));
+      if (name !== "timestamp_custom") return nmcDtStr(new NmcDT(ts * 1000, utc), "T");
+      return nmcStrftime(new Date(ts * 1000), nmcToStr(arg(0, "format_string", "%Y-%m-%d %H:%M:%S")), E.hass.language, utc);
+    }
+    case "as_timestamp": return nmcAsTimestamp(r, a.length ? a0 : kw.default);
+    case "as_datetime": { const dt = nmcToDT(r, false); return dt || (a.length ? a0 : NMC_UNDEF); }
+    case "as_local": { const dt = nmcToDT(r, false); return dt ? new NmcDT(dt.ms, false) : NMC_UNDEF; }
+    case "relative_time": return nmcRelTime(r);
+  }
+  if (Object.prototype.hasOwnProperty.call(nmcMathFns, name)) return _nmcFin(nmcMathFns[name]([nmcNum(r)].concat(_nmcArgNum(a))));
+  throw new Error(`|${name} → ${_t("filtre inconnu")}`);
+}
+
+/* ── Tests (is …) ── */
+function nmcTest(name, v, a, kw, E) {
+  const u = v instanceof NmcSafe ? v.s : v, b = a[0];
+  switch (name) {
+    case "defined": return !(u === NMC_UNDEF || u == null || u === "" || u === "None" || u === "unknown" || u === "unavailable");
+    case "undefined": return !nmcTest("defined", v, a, kw, E);
+    case "none": return u === null || u === NMC_UNDEF || u === "" || u === "None" || u === "none" || u === "unknown" || u === "unavailable";
+    case "number": return typeof u === "number" ? isFinite(u) : typeof u === "string" && !isNaN(parseFloat(u)) && isFinite(u);
+    case "is_number": return typeof u === "number" ? isFinite(u) : typeof u === "string" && _nmcNumRe.test(u.trim());
+    case "string": return typeof u === "string";
+    case "mapping": return nmcIsPlain(u);
+    case "iterable": return Array.isArray(u) || typeof u === "string" || nmcIsPlain(u) || u instanceof NmcDomain || u instanceof NmcStatesRoot;
+    case "sequence": return Array.isArray(u) || typeof u === "string" || nmcIsPlain(u);
+    case "list": return Array.isArray(u);
+    case "boolean": return typeof u === "boolean";
+    case "true": return u === true;
+    case "false": return u === false;
+    case "integer": return typeof u === "number" && Number.isInteger(u);
+    case "float": return typeof u === "number" && !Number.isInteger(u);
+    case "datetime": return u instanceof NmcDT;
+    case "even": return Math.trunc(nmcNum(u)) % 2 === 0;
+    case "odd": return Math.abs(Math.trunc(nmcNum(u)) % 2) === 1;
+    case "divisibleby": { const n = nmcNum(b); return n !== 0 && nmcNum(u) % n === 0; }
+    case "eq": case "equalto": case "==": return nmcEq(u, b);
+    case "ne": case "!=": return !nmcEq(u, b);
+    case "gt": case ">": return nmcOrd(u, b) > 0;
+    case "ge": case ">=": return nmcOrd(u, b) >= 0;
+    case "lt": case "<": return nmcOrd(u, b) < 0;
+    case "le": case "<=": return nmcOrd(u, b) <= 0;
+    case "sameas": return u === b;
+    case "in": return nmcIn(u, b);
+    case "contains": return nmcIn(b, u);
+    case "lower": return typeof u === "string" && u === u.toLowerCase();
+    case "upper": return typeof u === "string" && u === u.toUpperCase();
+    case "match": return nmcPyRe("^(?:" + nmcToStr(b) + ")", nmcTruthy(a[1]) ? "i" : "").test(nmcToStr(u));
+    case "search": return nmcPyRe(b, nmcTruthy(a[1]) ? "i" : "").test(nmcToStr(u));
+    case "escaped": return v instanceof NmcSafe;
+    case "callable": return false;
+  }
+  throw new Error(`is ${name} → ${_t("test inconnu")}`);
+}
+
+/* ── Compilation du template en arbre de nœuds ── */
 const NMC_MACRO_PREFIX = "__nmc_macro_";
-const NMC_MACRO_RESERVED = new Set([
-  "range", "states", "is_state", "state_attr", "as_timestamp", "now", "loop", "caller",
-]);
 let _nmcCtx = null;
 let _nmcErrs = null;
+const NMC_BLOCK_END = { if: "endif", for: "endfor", macro: "endmacro", call: "endcall", filter: "endfilter",
+  with: "endwith", block: "endblock", set: "endset" };
+const NMC_STRAY = new Set(["endif", "endfor", "endmacro", "endcall", "endfilter", "endwith", "endblock", "endset",
+  "elif", "else", "endraw"]);
 
-// Une macro definie dans un {% for %} / une macro appelante ne doit pas mourir avec le
-// scope enfant : Jinja2 la rend visible apres la boucle. On remonte la chaine de
-// prototypes (posee par Object.create) jusqu'au scope racine pour l'y stocker.
+// Paramètres de macro / de {% call(...) %} : noms avec défaut optionnel, jusqu'à ")".
+function nmcParseParams(P) {
+  const params = [];
+  P.expectOp("(");
+  while (!P.isOp(")")) {
+    const name = P.name();
+    params.push({ name, def: P.skipOp("=") ? P.expr() : null });
+    if (!P.skipOp(",")) break;
+  }
+  P.expectOp(")");
+  return params;
+}
+function nmcParseTargets(P) {
+  const paren = P.skipOp("("), targets = [];
+  do {
+    const name = P.name();
+    targets.push(P.skipOp(".") ? { ns: name, attr: P.name() } : { name });
+  } while (P.skipOp(",") && !P.isOp(")") && !P.isOp("="));
+  if (paren) P.expectOp(")");
+  return targets;
+}
+
+function nmcCompile(text) {
+  const toks = nmcLexTemplate(text);
+  let pos = 0;
+  const body = (stops) => {
+    const nodes = [];
+    while (pos < toks.length) {
+      const tk = toks[pos++];
+      if (tk.t === "text") { nodes.push({ t: "text", s: tk.s }); continue; }
+      if (tk.t === "cmt") continue;
+      if (tk.t === "out") {
+        try { nodes.push({ t: "out", e: nmcParseExpr(tk.s), src: tk.s.trim() }); }
+        catch (e) { nodes.push({ t: "err", msg: `{{ ${tk.s.trim().slice(0, 70)} }} → ${e.message}` }); }
+        continue;
+      }
+      const src = tk.s.trim(), m = /^(\w+)\s*([\s\S]*)$/.exec(src);
+      const kw = m ? m[1] : "", rest = m ? m[2] : "";
+      if (stops && stops.includes(kw)) return { nodes, stop: kw, rest, src };
+      nodes.push(tag(kw, rest, src));
+    }
+    return { nodes, stop: null };
+  };
+  // Bloc dont la balise de fin manque : rendu quand même, avec une erreur visible.
+  const closed = (b, end, node) => (b.stop ? node : { t: "seq", nodes: [node, { t: "err", msg: `{% ${end} %} ${_t("manquant")}` }] });
+  const tag = (kw, rest, src) => {
+    const fail = (e) => {
+      // un en-tête cassé consomme quand même son corps, sinon ce corps s'afficherait seul
+      const end = NMC_BLOCK_END[kw];
+      if (end && !(kw === "set" && /=/.test(rest))) body([end]);
+      return { t: "err", msg: `{% ${src.slice(0, 70)} %} → ${e.message}` };
+    };
+    try {
+      const P = new NmcParser(nmcLexExpr(rest));
+      switch (kw) {
+        case "if": {
+          const branches = [];
+          let cond = nmcParseExpr(rest), b;
+          for (;;) {
+            b = body(["elif", "else", "endif"]);
+            branches.push({ cond, body: b.nodes });
+            if (b.stop === "elif") { cond = nmcParseExpr(b.rest); continue; }
+            if (b.stop === "else") { b = body(["endif"]); branches.push({ cond: null, body: b.nodes }); }
+            break;
+          }
+          return closed(b, "endif", { t: "if", branches });
+        }
+        case "for": {
+          const targets = nmcParseTargets(P);
+          if (!P.skipName("in")) throw new Error(`${_t("attendu")} « in », ${_t("trouvé")} ${P.desc()}`);
+          const iter = P.tuple(true), cond = P.skipName("if") ? P.or() : null;
+          P.skipName("recursive");
+          P.end();
+          let b = body(["else", "endfor"]), elseBody = null;
+          const nodes = b.nodes;
+          if (b.stop === "else") { b = body(["endfor"]); elseBody = b.nodes; }
+          return closed(b, "endfor", { t: "for", targets, iter, cond, body: nodes, elseBody, src: rest.slice(0, 70) });
+        }
+        case "set": {
+          const targets = nmcParseTargets(P);
+          if (P.skipOp("=")) {
+            const e = P.tuple();
+            P.end();
+            return { t: "set", targets, e, src: rest.slice(0, 70) };
+          }
+          const tail = rest.slice(rest.indexOf(targets[targets.length - 1].name || targets[targets.length - 1].attr) +
+            (targets[targets.length - 1].name || targets[targets.length - 1].attr).length).trim();
+          const e = tail ? nmcParseExpr("__nmc_body" + tail) : null;
+          const b = body(["endset"]);
+          return closed(b, "endset", { t: "setblock", targets, e, body: b.nodes });
+        }
+        case "macro": {
+          const name = P.name(), params = P.isOp("(") ? nmcParseParams(P) : [];
+          P.end();
+          const b = body(["endmacro"]);
+          return closed(b, "endmacro", { t: "macro", name, params, body: b.nodes });
+        }
+        case "call": {
+          const callerParams = P.isOp("(") ? nmcParseParams(P) : [];
+          const call = P.expr();
+          P.end();
+          if (call.k !== "call" || call.f.k !== "name") throw new Error(_t("appel invalide"));
+          const b = body(["endcall"]);
+          return closed(b, "endcall", { t: "call", callerParams, call, body: b.nodes });
+        }
+        case "filter": {
+          const e = nmcParseExpr("__nmc_body|" + rest);
+          const b = body(["endfilter"]);
+          return closed(b, "endfilter", { t: "filter", e, body: b.nodes });
+        }
+        case "with": {
+          const assigns = [];
+          while (P.peek().k !== "eof") {
+            const name = P.name();
+            P.expectOp("=");
+            assigns.push([name, P.expr()]);
+            if (!P.skipOp(",")) break;
+          }
+          P.end();
+          const b = body(["endwith"]);
+          return closed(b, "endwith", { t: "with", assigns, body: b.nodes });
+        }
+        case "block": {
+          const b = body(["endblock"]);
+          return closed(b, "endblock", { t: "seq", nodes: b.nodes });
+        }
+        case "do": return { t: "do", e: nmcParseExpr(rest) };
+        case "break": case "continue": return { t: kw };
+        case "include": case "import": case "from": case "extends":
+          return { t: "err", msg: `{% ${src.slice(0, 70)} %} → ${_t("balise non supportée")}` };
+      }
+      if (NMC_STRAY.has(kw)) return { t: "err", msg: `{% ${src.slice(0, 70)} %} → ${_t("balise inattendue")}` };
+      return { t: "err", msg: `{% ${src.slice(0, 70)} %} → ${_t("balise inconnue")}` };
+    } catch (e) { return fail(e); }
+  };
+  return body(null).nodes;
+}
+
+/* ── Rendu ── */
+// Les macros définies dans un {% for %} restent visibles après la boucle (comme Jinja2) :
+// on les range dans le scope racine de la chaîne Object.create.
 function nmcMacroScope(vars) {
   let root = vars;
-  for (let i = 0; i < NMC_MAX_TEMPLATE_DEPTH; i++) {
+  for (let i = 0; i < 64; i++) {
     const proto = Object.getPrototypeOf(root);
     if (!proto || proto === Object.prototype) break;
     root = proto;
   }
   return root;
 }
-
-// Appel de macro : positionnels puis kwargs (nom=valeur), defauts pour le reste.
-// `def.scope` (blocs {% call %}) : le corps de caller() s'evalue dans le scope du site
-// d'appel, pas dans celui de la macro qui l'invoque — sinon les params de la macro
-// masqueraient les variables du site d'appel.
-// `callerDef` : expose a la macro sous le nom caller().
-function nmcCallMacro(name, def, argStr, hass, vars, callerDef) {
-  const pos = [],
-    kws = {};
-  for (const raw of nmcSplitTop(argStr, ",")) {
-    const a = raw.trim();
-    if (a === "") continue;
-    const kv = a.match(/^([a-zA-Z_]\w*)\s*=(?!=)\s*([\s\S]+)$/);
-    if (kv) kws[kv[1]] = kv[2];
-    else pos.push(a);
-  }
-  const child = Object.create(def.scope || vars);
-  for (let i = 0; i < def.params.length; i++) {
-    const param = def.params[i];
-    // nmcEvalF (pas nmcEval) : un argument d'appel peut porter des filtres chaines
-    // (ex. tuile(rd|round(0)|int)) — nmcEval seul ignore tout ce qui suit un "|".
-    // Les arguments s'evaluent dans le scope de l'appelant (vars), les defauts aussi.
-    if (Object.prototype.hasOwnProperty.call(kws, param.name)) {
-      child[param.name] = nmcEvalF(kws[param.name], hass, vars);
-      delete kws[param.name];
-    } else if (i < pos.length) child[param.name] = nmcEvalF(pos[i], hass, vars);
-    else child[param.name] = param.def != null ? nmcEvalF(param.def, hass, vars) : "";
-  }
-  const unknown = Object.keys(kws);
-  if (unknown.length && _nmcErrs) _nmcErrs.push(`${name}() → ${_t('argument inconnu')} : ${unknown.join(", ")}`);
-  // Own-property sur le child : un caller() d'un {% call %} englobant reste masque.
-  child[NMC_MACRO_PREFIX + "caller"] = callerDef || undefined;
-  // on reutilise le ctx du rendu en cours : la recursion est coupee par
-  // NMC_MAX_TEMPLATE_DEPTH au lieu de figer le navigateur.
-  return new NmcSafe(nmcRenderNodes(def.body, hass, child, _nmcErrs, _nmcCtx));
+function nmcNewCtx(hass, errs) {
+  const ctx = { chars: 0, iterations: 0, depth: 0, truncated: false, warned: new Set(), brk: null };
+  ctx.E = { hass, errs, ctx, root: null, warn: (m) => {
+    if (errs && !ctx.warned.has(m)) { ctx.warned.add(m); errs.push(m); }
+  } };
+  return ctx;
 }
-
-// "a, b='def'" -> [{name:'a', def:null}, {name:'b', def:"'def'"}]
-function nmcParseParams(src) {
-  return nmcSplitTop(src, ",")
-    .map((raw) => {
-      const seg = raw.trim();
-      if (!seg) return null;
-      const eq = nmcSplitTop(seg, "=");
-      return eq.length > 1
-        ? { name: eq[0].trim(), def: eq.slice(1).join("=").trim() }
-        : { name: seg, def: null };
-    })
-    .filter((param) => param && /^[a-zA-Z_]\w*$/.test(param.name));
-}
-
-function nmcCompile(text) {
-  text = text.replace(/\{#[\s\S]*?#\}/g, ""); // commentaires Jinja {# ... #}
-  _nmcTagRe.lastIndex = 0;
-  const tokens = [];
-  let last = 0,
-    m;
-  while ((m = _nmcTagRe.exec(text)) !== null) {
-    if (m.index > last) tokens.push({ t: "text", s: text.slice(last, m.index) });
-    last = _nmcTagRe.lastIndex;
-    if (m[1] !== undefined) tokens.push({ t: "expr", s: m[1].trim() });
-    else tokens.push({ t: "tag", s: m[2].trim() });
+function nmcAssign(targets, v, V, E) {
+  if (targets.length > 1) {
+    const seq = _nmcSeq(v instanceof NmcSafe ? v.s : v);
+    targets.forEach((t, i) => nmcAssign([t], i < seq.length ? seq[i] : NMC_UNDEF, V, E));
+    return;
   }
-  if (last < text.length) tokens.push({ t: "text", s: text.slice(last) });
-
-  let i = 0;
-  function parseSeq(stopKw) {
-    const nodes = [];
-    while (i < tokens.length) {
-      const tk = tokens[i];
-      if (tk.t === "text" || tk.t === "expr") {
-        nodes.push(tk);
-        i++;
-        continue;
-      }
-      const kw = tk.s.split(/\s+/, 1)[0];
-      if (stopKw && stopKw.includes(kw)) return nodes;
-      if (kw === "set") {
-        const mm = tk.s.match(/^set\s+([a-zA-Z_]\w*)\s*=\s*([\s\S]+)$/);
-        if (mm) nodes.push({ t: "set", name: mm[1], s: mm[2].trim() });
-        i++;
-      } else if (kw === "for") {
-        const mm = tk.s.match(/^for\s+([a-zA-Z_]\w*)\s+in\s+([\s\S]+)$/);
-        i++;
-        const body = parseSeq(["else", "endfor"]);
-        let elseBody = [];
-        if (i < tokens.length && tokens[i].t === "tag" && tokens[i].s.startsWith("else")) {
-          i++;
-          elseBody = parseSeq(["endfor"]);
-        }
-        if (i < tokens.length && tokens[i].t === "tag" && tokens[i].s.startsWith("endfor")) i++;
-        if (mm) nodes.push({ t: "for", name: mm[1], s: mm[2].trim(), body, elseBody });
-      } else if (kw === "macro") {
-        // {% macro nom(a, b=defaut) %} ... {% endmacro %}
-        const mm = tk.s.match(/^macro\s+([a-zA-Z_]\w*)\s*\(([\s\S]*)\)\s*$/);
-        i++;
-        const body = parseSeq(["endmacro"]);
-        if (i < tokens.length && tokens[i].t === "tag" && tokens[i].s.startsWith("endmacro")) i++;
-        if (mm) {
-          nodes.push({ t: "macro", name: mm[1], params: nmcParseParams(mm[2]), body });
-        }
-      } else if (kw === "call" || kw.startsWith("call(")) {
-        // {% call nom(args) %} ... {% endcall %}  ou  {% call(x, y) nom(args) %}
-        // (le kw est "call(x," quand caller() prend des params : split sur l'espace)
-        const mm = tk.s.match(/^call\s*(?:\(([^()]*)\))?\s*([a-zA-Z_]\w*)\s*\(([\s\S]*)\)\s*$/);
-        i++;
-        const body = parseSeq(["endcall"]);
-        if (i < tokens.length && tokens[i].t === "tag" && tokens[i].s.startsWith("endcall")) i++;
-        if (mm)
-          nodes.push({ t: "call", callerParams: nmcParseParams(mm[1] || ""), name: mm[2], args: mm[3], body });
-      } else if (kw === "if") {
-        i++;
-        const branches = [
-          { cond: tk.s.replace(/^if\s+/, "").trim(), body: parseSeq(["elif", "else", "endif"]) },
-        ];
-        while (i < tokens.length && tokens[i].t === "tag") {
-          const w = tokens[i].s.split(/\s+/, 1)[0];
-          if (w === "elif") {
-            const c = tokens[i].s.replace(/^elif\s+/, "").trim();
-            i++;
-            branches.push({ cond: c, body: parseSeq(["elif", "else", "endif"]) });
-          } else if (w === "else") {
-            i++;
-            branches.push({ cond: null, body: parseSeq(["endif"]) });
-          } else break;
-        }
-        if (i < tokens.length && tokens[i].t === "tag" && tokens[i].s.startsWith("endif")) i++;
-        nodes.push({ t: "if", branches });
-      } else {
-        i++;
-      }
-    }
-    return nodes;
+  const t = targets[0];
+  if (typeof v === "string") {
+    const num = parseFloat(v);
+    if (!isNaN(num) && String(num) === v.trim()) v = num;
   }
-  return parseSeq(null);
+  if (t.ns !== undefined) {
+    const o = nmcLookupRaw(V, t.ns);
+    if (o && nmcIsPlain(o)) o[t.attr] = v;
+    else E.warn(`set ${t.ns}.${t.attr} → ${_t("pas un namespace")}`);
+  } else V[t.name] = v;
 }
-
-// Registre des macros partagees (NMC_SHARED_MACROS_SRC) : { nom_prefixe: {params, body} }.
-// Rempli une seule fois par nmcInitSharedMacros(), a partir de l'AST compile (nmcCompile
-// n'a besoin d'aucun hass). Volontairement PAS de rendu ni de chaine de prototypes ici :
-// fusionner ces defs par Object.assign dans un vars-litteral garde nmcMacroScope() correct
-// (son proto reste Object.prototype -> la macro-scope racine reste la card, jamais la lib
-// partagee) — une chaine Object.create(sharedRoot) ferait remonter root jusqu'a la lib et
-// ferait fuiter les macros LOCALES d'une card vers toutes les autres.
-const NMC_SHARED_MACRO_DEFS = {};
-let _nmcSharedMacrosInit = false;
-function nmcInitSharedMacros() {
-  if (_nmcSharedMacrosInit) return;
-  _nmcSharedMacrosInit = true;
-  for (const n of nmcCompile(NMC_SHARED_MACROS_SRC)) {
-    if (n.t !== "macro") continue;
-    if (NMC_MACRO_RESERVED.has(n.name) || nmcMathFns[n.name]) continue; // meme garde-fou qu'au rendu
-    NMC_SHARED_MACRO_DEFS[NMC_MACRO_PREFIX + n.name] = { params: n.params, body: n.body };
-  }
-}
+const _nmcTgtSrc = (ts) => ts.map((t) => (t.ns !== undefined ? t.ns + "." + t.attr : t.name)).join(", ");
+const _nmcErrMsg = (e) => (e && e.message) || String(e);
 
 function nmcRenderNodes(nodes, hass, vars, errs, ctx) {
-  ctx = ctx || { chars: 0, iterations: 0, depth: 0, truncated: false, warned: new Set() };
-  const warn = (message) => {
-    if (errs && !ctx.warned.has(message)) {
-      ctx.warned.add(message);
-      errs.push(message);
-    }
-  };
+  ctx = ctx || nmcNewCtx(hass, errs);
+  const E = ctx.E, warn = E.warn;
   if (ctx.depth >= NMC_MAX_TEMPLATE_DEPTH) {
     warn(`${_t('template → profondeur maximale')} (${NMC_MAX_TEMPLATE_DEPTH})`);
     return "";
   }
   ctx.depth++;
-  const _prevCtx = _nmcCtx,
-    _prevErrs = _nmcErrs;
+  const _prevCtx = _nmcCtx, _prevErrs = _nmcErrs;
   _nmcCtx = ctx;
   _nmcErrs = errs;
   let out = "";
   const append = (value) => {
     if (ctx.truncated) return;
-    const text = String(value);
-    const room = NMC_MAX_TEMPLATE_OUTPUT - ctx.chars;
-    if (room <= 0) {
-      ctx.truncated = true;
-      warn(`${_t('template → sortie limitée à')} ${NMC_MAX_TEMPLATE_OUTPUT} ${_t('caractères')}`);
-      return;
-    }
+    const text = String(value), room = NMC_MAX_TEMPLATE_OUTPUT - ctx.chars;
     if (text.length > room) {
-      out += text.slice(0, room);
-      ctx.chars += room;
+      out += text.slice(0, Math.max(0, room));
+      ctx.chars += Math.max(0, room);
       ctx.truncated = true;
       warn(`${_t('template → sortie limitée à')} ${NMC_MAX_TEMPLATE_OUTPUT} ${_t('caractères')}`);
       return;
@@ -540,106 +2069,108 @@ function nmcRenderNodes(nodes, hass, vars, errs, ctx) {
     out += text;
     ctx.chars += text.length;
   };
+  // le texte rendu par un sous-bloc est déjà compté dans ctx.chars
+  const sub = (b, V) => { out += nmcRenderNodes(b, hass, V, errs, ctx); };
+  const withBody = (V, value) => { const c = Object.create(V); c.__nmc_body = value; return c; };
   try {
     for (const n of nodes) {
-      if (ctx.truncated) break;
-      if (n.t === "text") {
-        append(n.s);
-        continue;
-      }
-      if (n.t === "expr") {
-        try {
-          const { expr, filters } = nmcSplitFilters(n.s);
-          append(nmcEscOut(nmcApplyFilters(nmcEval(expr, hass, vars), filters, hass, vars)));
-        } catch (e) {
-          if (errs) errs.push(`{{ ${String(n.s).slice(0, 70)} }} → ${(e && e.message) || e}`);
-        }
-        continue;
-      }
-      if (n.t === "macro") {
-        // definition seule : on stocke, on n'emet RIEN (sinon le corps sort inline)
-        if (NMC_MACRO_RESERVED.has(n.name) || nmcMathFns[n.name]) {
-          warn(`macro ${n.name} → ${_t('nom reserve, definition ignoree')}`);
-        } else {
+      if (ctx.truncated || ctx.brk) break;
+      switch (n.t) {
+        case "text": append(n.s); break;
+        case "out":
+          try { append(nmcEscOut(nmcEv(n.e, vars, E))); }
+          catch (e) { warn(`{{ ${n.src.slice(0, 70)} }} → ${_nmcErrMsg(e)}`); }
+          break;
+        case "err": warn(n.msg); break;
+        case "seq": sub(n.nodes, vars); break;
+        case "macro":
           nmcMacroScope(vars)[NMC_MACRO_PREFIX + n.name] = { params: n.params, body: n.body };
-        }
-        continue;
-      }
-      if (n.t === "call") {
-        const def = vars[NMC_MACRO_PREFIX + n.name];
-        if (!def) {
-          if (errs) errs.push(`call ${n.name}() → ${_t('macro inconnue')}`);
-          continue;
-        }
-        try {
-          const callerDef = { params: n.callerParams, body: n.body, scope: vars };
-          append(nmcCallMacro(n.name, def, n.args, hass, vars, callerDef));
-        } catch (e) {
-          if (errs) errs.push(`call ${n.name}() → ${(e && e.message) || e}`);
-        }
-        continue;
-      }
-      if (n.t === "set") {
-        try {
-          const { expr, filters } = nmcSplitFilters(n.s);
-          let v = nmcEval(expr, hass, vars);
-          if (filters) v = nmcApplyFilters(v, filters, hass, vars);
-          if (typeof v === "string") {
-            const num = parseFloat(v);
-            if (!isNaN(num) && String(num) === v.trim()) v = num;
-          }
-          vars[n.name] = v;
-        } catch (e) {
-          vars[n.name] = "";
-          if (errs) errs.push(`set ${n.name} = ${String(n.s).slice(0, 70)} → ${(e && e.message) || e}`);
-        }
-        continue;
-      }
-      if (n.t === "for") {
-        let list;
-        try {
-          const { expr, filters } = nmcSplitFilters(n.s);
-          list = nmcApplyFilters(nmcEval(expr, hass, vars), filters, hass, vars);
-        } catch (e) {
-          if (errs) errs.push(`for ${n.name} in ${String(n.s).slice(0, 70)} → ${(e && e.message) || e}`);
-          continue;
-        }
-        if (!Array.isArray(list)) {
-          if (errs) errs.push(`for ${n.name} in ${String(n.s).slice(0, 70)} → ${_t('pas une liste')} (${typeof list})`);
-          continue;
-        }
-        if (list.length === 0 && n.elseBody && n.elseBody.length) {
-          out += nmcRenderNodes(n.elseBody, hass, vars, errs, ctx);
-          continue;
-        }
-        const len = Math.min(list.length, NMC_MAX_TEMPLATE_ITERATIONS - ctx.iterations);
-        if (len < list.length)
-          warn(`for ${n.name} → ${_t('itérations limitées à')} ${NMC_MAX_TEMPLATE_ITERATIONS}`);
-        for (let i = 0; i < len && !ctx.truncated; i++) {
-          ctx.iterations++;
-          const child = Object.create(vars);
-          child[n.name] = list[i];
-          child.loop = { index: i + 1, index0: i, first: i === 0, last: i === len - 1, length: len };
-          out += nmcRenderNodes(n.body, hass, child, errs, ctx);
-        }
-        continue;
-      }
-      if (n.t === "if") {
-        for (const br of n.branches) {
-          if (br.cond === null) {
-            out += nmcRenderNodes(br.body, hass, vars, errs, ctx);
-            break;
-          }
-          let ok = false;
+          break;
+        case "call": {
+          const name = n.call.f.v, def = nmcLookupRaw(vars, NMC_MACRO_PREFIX + name);
+          if (!def) { warn(`call ${name}() → ${_t('macro inconnue')}`); break; }
           try {
-            ok = nmcTruthy(nmcEval(br.cond, hass, vars));
-          } catch (e) {
-            if (errs) errs.push(`if ${String(br.cond).slice(0, 70)} → ${(e && e.message) || e}`);
+            const { args, kw } = nmcEvArgs(n.call, vars, E);
+            append(nmcEscOut(nmcInvokeMacro(name, def, args, kw, vars, E, { params: n.callerParams, body: n.body, scope: vars })));
+          } catch (e) { warn(`call ${name}() → ${_nmcErrMsg(e)}`); }
+          break;
+        }
+        case "set":
+          try { nmcAssign(n.targets, nmcEv(n.e, vars, E), vars, E); }
+          catch (e) {
+            n.targets.forEach((t) => { if (t.name !== undefined) vars[t.name] = ""; });
+            warn(`set ${_nmcTgtSrc(n.targets)} = ${n.src} → ${_nmcErrMsg(e)}`);
           }
-          if (ok) {
-            out += nmcRenderNodes(br.body, hass, vars, errs, ctx);
-            break;
+          break;
+        case "setblock": {
+          let v = new NmcSafe(nmcRenderNodes(n.body, hass, vars, errs, ctx));
+          try { if (n.e) v = nmcEv(n.e, withBody(vars, v), E); }
+          catch (e) { warn(`set ${_nmcTgtSrc(n.targets)} → ${_nmcErrMsg(e)}`); }
+          nmcAssign(n.targets, v, vars, E);
+          break;
+        }
+        case "filter": {
+          const v = new NmcSafe(nmcRenderNodes(n.body, hass, vars, errs, ctx));
+          try { append(nmcToStr(nmcEv(n.e, withBody(vars, v), E))); }
+          catch (e) { warn(`filter → ${_nmcErrMsg(e)}`); }
+          break;
+        }
+        case "with": {
+          const c = Object.create(vars);
+          try { for (const [k, e] of n.assigns) c[k] = nmcEv(e, c, E); }
+          catch (e) { warn(`with → ${_nmcErrMsg(e)}`); }
+          sub(n.body, c);
+          break;
+        }
+        case "do":
+          try { nmcEv(n.e, vars, E); } catch (e) { warn(`do → ${_nmcErrMsg(e)}`); }
+          break;
+        case "break": case "continue": ctx.brk = n.t; break;
+        case "if":
+          for (const br of n.branches) {
+            let ok = br.cond === null;
+            if (!ok) {
+              try { ok = nmcTruthy(nmcEv(br.cond, vars, E)); }
+              catch (e) { warn(`{% if %} → ${_nmcErrMsg(e)}`); }
+            }
+            if (ok) { sub(br.body, vars); break; }
           }
+          break;
+        case "for": {
+          const head = `for ${_nmcTgtSrc(n.targets)} in ${n.src}`;
+          let it;
+          try { it = nmcEv(n.iter, vars, E); }
+          catch (e) { warn(`${head} → ${_nmcErrMsg(e)}`); break; }
+          if (it instanceof NmcSafe) it = it.s;
+          let list;
+          if (it === NMC_UNDEF) list = [];
+          else if (Array.isArray(it)) list = it;
+          else if (it instanceof NmcDomain || it instanceof NmcStatesRoot) list = it.list();
+          else if (nmcIsPlain(it)) list = Object.keys(it);
+          else if (typeof it === "string") list = Array.from(it);
+          else { warn(`${head} → ${_t('pas une liste')} (${it === null ? "none" : typeof it})`); break; }
+          const bind = (V, x) => {
+            if (n.targets.length === 1) V[n.targets[0].name] = x;
+            else { const s = _nmcSeq(x instanceof NmcSafe ? x.s : x); n.targets.forEach((t, i) => { V[t.name] = i < s.length ? s[i] : NMC_UNDEF; }); }
+          };
+          if (n.cond) {
+            try { list = list.filter((x) => { const c = Object.create(vars); bind(c, x); return nmcTruthy(nmcEv(n.cond, c, E)); }); }
+            catch (e) { warn(`${head} → ${_nmcErrMsg(e)}`); break; }
+          }
+          if (!list.length) { if (n.elseBody) sub(n.elseBody, vars); break; }
+          const len = Math.min(list.length, Math.max(0, NMC_MAX_TEMPLATE_ITERATIONS - ctx.iterations));
+          if (len < list.length) warn(`for ${_nmcTgtSrc(n.targets)} → ${_t('itérations limitées à')} ${NMC_MAX_TEMPLATE_ITERATIONS}`);
+          const items = len < list.length ? list.slice(0, len) : list;
+          const pl = nmcLookupRaw(vars, "loop"), depth = pl instanceof NmcLoop ? pl.depth + 1 : 1;
+          for (let i = 0; i < len && !ctx.truncated; i++) {
+            ctx.iterations++;
+            const child = Object.create(vars);
+            bind(child, items[i]);
+            child.loop = new NmcLoop(i, len, items, depth);
+            sub(n.body, child);
+            if (ctx.brk) { const b = ctx.brk; ctx.brk = null; if (b === "break") break; }
+          }
+          break;
         }
       }
     }
@@ -651,31 +2182,43 @@ function nmcRenderNodes(nodes, hass, vars, errs, ctx) {
   return out;
 }
 
+/* ── Macros partagées, cache, API ── */
+const NMC_SHARED_MACRO_DEFS = {};
+let _nmcSharedMacrosInit = false;
+function nmcInitSharedMacros() {
+  if (_nmcSharedMacrosInit) return;
+  _nmcSharedMacrosInit = true;
+  for (const n of nmcCompile(NMC_SHARED_MACROS_SRC)) {
+    if (n.t === "macro") NMC_SHARED_MACRO_DEFS[NMC_MACRO_PREFIX + n.name] = { params: n.params, body: n.body };
+  }
+}
+
 const _nmcCache = new Map();
+function _nmcCached(key, build) {
+  let v = _nmcCache.get(key);
+  if (!v) {
+    v = build();
+    if (_nmcCache.size > 200) _nmcCache.clear();
+    _nmcCache.set(key, v);
+  }
+  return v;
+}
 function nmcParseTemplate(hass, text, vars, errs) {
   if (!hass || !text || typeof text !== "string") return text;
-
   const d = new Date();
   vars = vars || {};
   // now_hour / now_minute : exposés à plat, gardés pour les cards qui les utilisent.
-  // (Les dicts dans un {% set %} sont supportés depuis la v4.8 — ce n'est plus un contournement.)
   vars["now_hour"] = d.getHours();
   vars["now_minute"] = d.getMinutes();
-  // Macros partagees (v4.9) : fusionnees en own-properties de ce vars-litteral, pas via
-  // Object.create — une macro locale du meme nom definie dans `text` l'ecrasera sans
-  // affecter les autres cards (cf commentaire sur nmcInitSharedMacros()).
+  // Macros partagées : own-properties de ce vars littéral ; une macro locale du même nom
+  // définie dans `text` l'écrase pour cette card seulement.
   nmcInitSharedMacros();
   Object.assign(vars, NMC_SHARED_MACRO_DEFS);
-
-  let nodes = _nmcCache.get(text);
-  if (!nodes) {
-    nodes = nmcCompile(text);
-    if (_nmcCache.size > 200) _nmcCache.clear();
-    _nmcCache.set(text, nodes);
-  }
+  const nodes = _nmcCached(text, () => nmcCompile(text));
   return nmcRenderNodes(nodes, hass, vars, errs).trim();
 }
 
+// Titre : posé par textContent, qui ne crée jamais de balise ; l'échapper afficherait &amp;.
 function nmcParseTemplateText(hass, text, vars, errs) {
   const prev = _nmcRawOut;
   _nmcRawOut = true;
@@ -683,1033 +2226,14 @@ function nmcParseTemplateText(hass, text, vars, errs) {
   finally { _nmcRawOut = prev; }
 }
 
-function nmcSplitFilters(s) {
-  let depth = 0,
-    inStr = "",
-    pipeIdx = -1,
-    hasOp = false;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (c === inStr) inStr = "";
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      inStr = c;
-      continue;
-    }
-    if (c === "(" || c === "[" || c === "{") {
-      depth++;
-      continue;
-    }
-    if (c === ")" || c === "]" || c === "}") {
-      depth--;
-      continue;
-    }
-    if (depth !== 0) continue;
-    if (c === "|" && pipeIdx < 0) pipeIdx = i;
-    else if (c === "~") hasOp = true;
-    else if (c === "<" || c === ">" || c === "=" || c === "!") hasOp = true;
-    else if (
-      s.substr(i, 4) === " if " ||
-      s.substr(i, 6) === " else " ||
-      s.substr(i, 5) === " and " ||
-      s.substr(i, 4) === " or "
-    )
-      hasOp = true;
-  }
-  if (pipeIdx >= 0 && !hasOp)
-    return { expr: s.slice(0, pipeIdx).trim(), filters: s.slice(pipeIdx) };
-  return { expr: s.trim(), filters: "" };
-}
-
-// Évalue une sous-expression EN APPLIQUANT ses filtres top-level : nécessaire dans les
-// branches de ternaire, opérandes logiques et côtés de ~ (sinon x|round(1) y est perdu).
-function nmcEvalF(s, hass, vars) {
-  const sf = nmcSplitFilters(String(s).trim());
-  let v = nmcEval(sf.expr, hass, vars);
-  if (sf.filters) v = nmcApplyFilters(v, sf.filters, hass, vars);
-  return v;
-}
-
-function nmcEval(expr, hass, vars) {
-  expr = String(expr).trim();
-  if (expr[0] === "[" && expr[expr.length - 1] === "]") {
-    const inner = expr.slice(1, -1).trim();
-    if (inner === "") return [];
-    // Virgule finale tolérée comme en vrai Jinja : ignorer les segments vides
-    return nmcSplitTop(inner, ",").filter((e) => e.trim() !== "").map((e) => nmcEval(e.trim(), hass, vars));
-  }
-  if (expr[0] === "{" && expr[expr.length - 1] === "}") {
-    const inner = expr.slice(1, -1).trim();
-    const obj = {};
-    if (inner !== "") {
-      for (const pair of nmcSplitTop(inner, ",")) {
-        const kv = nmcSplitTop(pair, ":");
-        if (kv.length !== 2) continue;
-        // valeur = expression + filtres éventuels (ex: state_attr(...)|int(0))
-        const vf = nmcSplitFilters(kv[1].trim());
-        let vv = nmcEval(vf.expr, hass, vars);
-        if (vf.filters) vv = nmcApplyFilters(vv, vf.filters, hass, vars);
-        obj[kv[0].trim().replace(/^['"]|['"]$/g, "")] = vv;
-      }
-    }
-    return obj;
-  }
-  // Littéral tuple (a, b, c, ...) : distinct des parenthèses de regroupement (a+b)*(c+d).
-  // Condition : commence par "(", cette parenthèse ferme bien en tout dernier caractère
-  // (sinon c'est ex. "(a)+(b)"), ET il y a au moins une virgule top-level à l'intérieur
-  // (sinon "(a)" reste un simple regroupement scalaire, géré par nmcAtom).
-  if (expr[0] === "(" && expr[expr.length - 1] === ")") {
-    let depth = 0, closesAtEnd = false;
-    for (let i = 0; i < expr.length; i++) {
-      const c = expr[i];
-      if (c === "(" || c === "[" || c === "{") depth++;
-      else if (c === ")" || c === "]" || c === "}") {
-        depth--;
-        if (depth === 0) { closesAtEnd = i === expr.length - 1; break; }
-      }
-    }
-    if (closesAtEnd) {
-      const inner = expr.slice(1, -1).trim();
-      const parts = nmcSplitTop(inner, ",").filter((e) => e.trim() !== "");
-      if (parts.length > 1) return parts.map((e) => nmcEval(e.trim(), hass, vars));
-    }
-  }
-  const tern = nmcSplitTernary(expr);
-  if (tern)
-    return nmcTruthy(nmcEvalF(tern.cond, hass, vars))
-      ? nmcEvalF(tern.t, hass, vars)
-      : nmcEvalF(tern.f, hass, vars);
-  const orSplit = nmcSplitLogic(expr, "or");
-  if (orSplit) {
-    // sémantique Python : 'a or b' = a si truthy, sinon b (renvoie la VALEUR, pas 1/0)
-    const a = nmcEvalF(orSplit.a, hass, vars);
-    return nmcTruthy(a) ? a : nmcEvalF(orSplit.b, hass, vars);
-  }
-  const andSplit = nmcSplitLogic(expr, "and");
-  if (andSplit) {
-    // sémantique Python : 'a and b' = b si a truthy, sinon a
-    const a = nmcEvalF(andSplit.a, hass, vars);
-    return nmcTruthy(a) ? nmcEvalF(andSplit.b, hass, vars) : a;
-  }
-  if (/^not\s+/.test(expr))
-    return nmcTruthy(nmcEvalF(expr.replace(/^not\s+/, ""), hass, vars)) ? 0 : 1;
-  {
-    const isM = nmcSplitIs(expr);
-    if (isM) {
-      const v = nmcEvalF(isM.val, hass, vars);
-      let res;
-      if (isM.test === "none")
-        res =
-          v === "" ||
-          v == null ||
-          v === "None" ||
-          v === "none" ||
-          v === "unknown" ||
-          v === "unavailable";
-      else if (isM.test === "defined")
-        res = !(v === "" || v == null || v === "None" || v === "unknown" || v === "unavailable");
-      else if (isM.test === "number") res = !isNaN(parseFloat(v)) && isFinite(v);
-      else if (isM.test === "string") res = typeof v === "string";
-      else res = nmcTruthy(v);
-      return (isM.neg ? !res : res) ? 1 : 0;
-    }
-  }
-  {
-    const inM = nmcSplitIn(expr);
-    if (inM) {
-      const val = nmcEvalF(inM.val, hass, vars);
-      const collection = nmcEvalF(inM.list, hass, vars);
-      const same = (a, b) => {
-        const na = parseFloat(a),
-          nb = parseFloat(b);
-        return !isNaN(na) && !isNaN(nb) ? na === nb : String(a) === String(b);
-      };
-      const found = Array.isArray(collection)
-        ? collection.some((item) => same(item, val))
-        : typeof collection === "string"
-          ? collection.includes(nmcToStr(val))
-          : collection && typeof collection === "object"
-            ? Object.prototype.hasOwnProperty.call(collection, val)
-            : false;
-      return (inM.neg ? !found : found) ? 1 : 0;
-    }
-  }
-  const cmp = nmcSplitCompare(expr);
-  if (cmp) {
-    const evalSide = (side) => {
-      const sf = nmcSplitFilters(side.trim());
-      let v = nmcEval(sf.expr, hass, vars);
-      if (sf.filters) v = nmcApplyFilters(v, sf.filters, hass, vars);
-      return v;
-    };
-    const a = evalSide(cmp.a),
-      b = evalSide(cmp.b);
-    const na = parseFloat(a),
-      nb = parseFloat(b);
-    const num = !isNaN(na) && !isNaN(nb);
-    switch (cmp.op) {
-      case "==":
-        return (num ? na === nb : String(a) === String(b)) ? 1 : 0;
-      case "!=":
-        return (num ? na !== nb : String(a) !== String(b)) ? 1 : 0;
-      case ">":
-        return na > nb ? 1 : 0;
-      case "<":
-        return na < nb ? 1 : 0;
-      case ">=":
-        return na >= nb ? 1 : 0;
-      case "<=":
-        return na <= nb ? 1 : 0;
-    }
-  }
-  {
-    let depth = 0,
-      inStr = "";
-    for (let i = 0; i < expr.length; i++) {
-      const c = expr[i];
-      if (inStr) {
-        if (c === inStr) inStr = "";
-        continue;
-      }
-      if (c === '"' || c === "'") {
-        inStr = c;
-        continue;
-      }
-      if (c === "(" || c === "[" || c === "{") depth++;
-      else if (c === ")" || c === "]" || c === "}") depth--;
-      else if (c === "~" && depth === 0)
-        return (
-          nmcToStr(nmcEvalF(expr.slice(0, i), hass, vars)) +
-          nmcToStr(nmcEvalF(expr.slice(i + 1), hass, vars))
-        );
-    }
-  }
-  if (!/^['"]/.test(expr)) {
-    const masked = expr
-      .replace(/(states|is_state|state_attr)\([^)]*\)/g, "0")
-      .replace(/['"][^'"]*['"]/g, "0");
-    if (/[+\-*/%]/.test(masked) || /\([^)]*[+\-*/%]/.test(expr)) {
-      const r = nmcEvalArith(expr, hass, vars);
-      if (r !== undefined) return r;
-    }
-  }
-  return nmcAtom(expr, hass, vars);
-}
-
-function nmcSplitTop(s, sep) {
-  const out = [];
-  let depth = 0,
-    inStr = "",
-    start = 0;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (c === inStr) inStr = "";
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      inStr = c;
-      continue;
-    }
-    if (c === "(" || c === "[" || c === "{") depth++;
-    else if (c === ")" || c === "]" || c === "}") depth--;
-    else if (c === sep && depth === 0) {
-      out.push(s.slice(start, i));
-      start = i + 1;
-    }
-  }
-  out.push(s.slice(start));
-  return out;
-}
-
-function nmcStrftime(d, fmt, lang) {
-  const p2 = (n) => String(n).padStart(2, "0");
-  const name = (opts) => {
-    try {
-      return new Intl.DateTimeFormat(lang || "en", opts).format(d);
-    } catch (e) {
-      return new Intl.DateTimeFormat("en", opts).format(d);
-    }
-  };
-  const h12 = d.getHours() % 12 || 12;
-  const jan1 = new Date(d.getFullYear(), 0, 1);
-  const yday = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - jan1) / 864e5) + 1;
-  const map = {
-    H: () => p2(d.getHours()),
-    I: () => p2(h12),
-    M: () => p2(d.getMinutes()),
-    S: () => p2(d.getSeconds()),
-    p: () => (d.getHours() < 12 ? "AM" : "PM"),
-    d: () => p2(d.getDate()),
-    e: () => String(d.getDate()).padStart(2, " "),
-    m: () => p2(d.getMonth() + 1),
-    y: () => p2(d.getFullYear() % 100),
-    Y: () => String(d.getFullYear()),
-    j: () => String(yday).padStart(3, "0"),
-    a: () => name({ weekday: "short" }),
-    A: () => name({ weekday: "long" }),
-    b: () => name({ month: "short" }),
-    B: () => name({ month: "long" }),
-    u: () => String(d.getDay() || 7),
-    w: () => String(d.getDay()),
-    "%": () => "%",
-  };
-  return fmt.replace(/%(.)/g, (all, c) => (map[c] ? map[c]() : all));
-}
-
-function nmcAtom(s, hass, vars) {
-  s = s.trim();
-  if (s === "") return "";
-  if (/^(true|false)$/i.test(s)) return s.toLowerCase() === "true";
-  if (/^(none|null)$/i.test(s)) return null;
-  if (/^-?\d+(\.\d+)?$/.test(s)) return parseFloat(s);
-  if (/^['"][\s\S]*['"]$/.test(s)) return s.slice(1, -1);
-  const nowPart = s.match(/^now\(\)\.(hour|minute|second)$/);
-  if (nowPart) {
-    const current = new Date();
-    return nowPart[1] === "hour"
-      ? current.getHours()
-      : nowPart[1] === "minute"
-        ? current.getMinutes()
-        : current.getSeconds();
-  }
-  if (s === "now()") return new Date();
-  const strfMatch = s.match(/^now\(\)\.strftime\(\s*(['"])([\s\S]*)\1\s*\)$/);
-  if (strfMatch) return nmcStrftime(new Date(), strfMatch[2], hass && (hass.locale?.language || hass.language));
-  const rangeMatch = s.match(/^range\(([^()]*)\)$/);
-  if (rangeMatch) {
-    const args = nmcSplitTop(rangeMatch[1], ",").map((arg) => Number(nmcEval(arg.trim(), hass, vars)));
-    if (args.length < 1 || args.length > 3 || args.some((arg) => !Number.isFinite(arg))) return [];
-    const start = args.length === 1 ? 0 : args[0];
-    const end = args.length === 1 ? args[0] : args[1];
-    const step = args.length === 3 ? args[2] : 1;
-    if (step === 0) return [];
-    const values = [];
-    for (let value = start; step > 0 ? value < end : value > end; value += step) {
-      values.push(value);
-      if (values.length >= NMC_MAX_TEMPLATE_ITERATIONS) break;
-    }
-    return values;
-  }
-  const timestampMatch = s.match(/^as_timestamp\((.*)\)$/);
-  if (timestampMatch) {
-    const args = nmcSplitTop(timestampMatch[1], ",");
-    const value = nmcEval(args[0]?.trim() || "", hass, vars);
-    const fallback = args.length > 1 ? Number(nmcEval(args[1].trim(), hass, vars)) : 0;
-    if (value instanceof Date) return value.getTime() / 1000;
-    const timestamp = Date.parse(String(value));
-    return Number.isFinite(timestamp) ? timestamp / 1000 : Number.isFinite(fallback) ? fallback : 0;
-  }
-  let m = s.match(/^states\(\s*['"](.+?)['"]\s*\)$/);
-  if (m) {
-    const st = hass.states[m[1]];
-    return st ? st.state : "";
-  }
-  // states() à entité DYNAMIQUE : states(var) où var contient l'entity_id
-  if (s.startsWith("states(") && s.endsWith(")")) {
-    const inner = s.slice(7, -1);
-    if (nmcSplitTop(inner, ",").length === 1) {
-      const ent = nmcToStr(nmcEval(inner, hass, vars));
-      const st = hass.states[ent];
-      return st ? st.state : "";
-    }
-  }
-  m = s.match(/^is_state\(\s*['"](.+?)['"]\s*,\s*['"](.+?)['"]\s*\)$/);
-  if (m) {
-    const st = hass.states[m[1]];
-    return st && st.state === m[2] ? 1 : 0;
-  }
-  m = s.match(/^state_attr\(\s*['"](.+?)['"]\s*,\s*['"](.+?)['"]\s*\)$/);
-  if (m) {
-    const st = hass.states[m[1]];
-    return st && st.attributes ? (st.attributes[m[2]] ?? "") : "";
-  }
-  // state_attr à arguments DYNAMIQUES : state_attr('sensor.x', 'g_' ~ d ~ '_' ~ h)
-  if (s.startsWith("state_attr(") && s.endsWith(")")) {
-    const dynArgs = nmcSplitTop(s.slice(11, -1), ",");
-    if (dynArgs.length === 2) {
-      const ent = nmcToStr(nmcEval(dynArgs[0], hass, vars));
-      const attr = nmcToStr(nmcEval(dynArgs[1], hass, vars));
-      const st = hass.states[ent];
-      return st && st.attributes ? (st.attributes[attr] ?? "") : "";
-    }
-  }
-  // découpage Python base[a:b] / base[a:b:pas] sur liste ou chaîne (ex: items[:3], s[-2:]).
-  // Doit passer AVANT l'accès par clé : sinon "a:b" serait évalué comme une clé.
-  {
-    const ms = s.match(/^([a-zA-Z_]\w*(?:\.[a-zA-Z_0-9]\w*)*|\([^]*\))\s*\[([^]*)\]$/);
-    const parts = ms ? nmcSplitTop(ms[2], ":") : null;
-    if (parts && parts.length >= 2 && parts.length <= 3) {
-      const base = nmcEval(ms[1], hass, vars);
-      if (Array.isArray(base) || typeof base === "string") {
-        const num = (p) => {
-          if (p.trim() === "") return null;
-          const v = Math.trunc(Number(nmcEvalF(p, hass, vars)));
-          return Number.isFinite(v) ? v : null;
-        };
-        const len = base.length;
-        const step = parts.length === 3 ? num(parts[2]) ?? 1 : 1;
-        if (step === 0) return Array.isArray(base) ? [] : "";
-        const norm = (v, dflt) => (v == null ? dflt : v < 0 ? Math.max(v + len, step < 0 ? -1 : 0) : Math.min(v, step < 0 ? len - 1 : len));
-        const start = norm(num(parts[0]), step > 0 ? 0 : len - 1);
-        const stop = norm(num(parts[1]), step > 0 ? len : -1);
-        const seq = Array.isArray(base) ? base : Array.from(base);
-        const out = [];
-        for (let k = start; step > 0 ? k < stop : k > stop; k += step) {
-          out.push(seq[k]);
-          if (out.length >= NMC_MAX_TEMPLATE_ITERATIONS) break;
-        }
-        return Array.isArray(base) ? out : out.join("");
-      }
-      return "";
-    }
-  }
-  // accès dict/list par CLÉ DYNAMIQUE : base[expr]  (ex: colors[nm], row[i])
-  // base = var connue ou expression entre (), la clé est ré-évaluée
-  {
-    const mi = s.match(/^([a-zA-Z_]\w*|\([^]*\))\s*\[([^]+)\]((?:\.[a-zA-Z_0-9]\w*)*)$/);
-    if (mi) {
-      let base = nmcEval(mi[1], hass, vars);
-      if (base != null && typeof base === "object") {
-        const key = nmcEval(mi[2].trim(), hass, vars);
-        let v = base[key];
-        // v4.0 : chemin pointé APRÈS le crochet (ex: hist['sensor.x'].pts)
-        if (mi[3]) {
-          for (const seg of mi[3].split(".").filter(Boolean)) {
-            if (v == null) return "";
-            v = v[seg];
-          }
-        }
-        return v == null ? "" : v;
-      }
-    }
-  }
-  // méthode .get(clé[, défaut])  (ex: colors.get(nm), colors.get(nm, '#fff'))
-  {
-    const mg = s.match(/^([a-zA-Z_]\w*)\.get\((.+)\)$/);
-    if (mg) {
-      const base = vars[mg[1]];
-      if (base != null && typeof base === "object") {
-        const args = nmcSplitTop(mg[2], ",");
-        const key = nmcEval(args[0].trim(), hass, vars);
-        const has = Object.prototype.hasOwnProperty.call(base, key);
-        if (has) return base[key] == null ? "" : base[key];
-        return args.length > 1 ? nmcEval(args[1].trim(), hass, vars) : "";
-      }
-    }
-  }
-  if (/^[a-zA-Z_]\w*(\.[a-zA-Z_0-9]\w*)+$/.test(s)) {
-    const statePath = s.match(/^states\.([a-z_]+\.[a-zA-Z0-9_]+)(?:\.(state|[a-zA-Z_][a-zA-Z0-9_]*))?$/);
-    if (statePath) {
-      const state = hass.states[statePath[1]];
-      if (!state) return "";
-      return statePath[2] ? state[statePath[2]] ?? "" : state;
-    }
-    const path = s.split(".");
-    let cur = path[0] in vars ? vars[path[0]] : undefined;
-    for (let i = 1; i < path.length && cur != null; i++) cur = cur[path[i]];
-    return cur == null ? "" : cur;
-  }
-  // appel de macro : nom(args...) defini par {% macro %}
-  {
-    const mc = s.match(/^([a-zA-Z_]\w*)\s*\(([\s\S]*)\)$/);
-    if (mc && vars[NMC_MACRO_PREFIX + mc[1]])
-      return nmcCallMacro(mc[1], vars[NMC_MACRO_PREFIX + mc[1]], mc[2], hass, vars, null);
-    if (mc && mc[1] === "caller") {
-      // macro appelee par {{ m() }} et non par {% call %} : rien a injecter
-      if (_nmcErrs) _nmcErrs.push(`caller() → ${_t('hors d\'un bloc call')}`);
-      return "";
-    }
-  }
-  if (s in vars) return vars[s];
-  if (s[0] === "(") {
-    let depth = 0,
-      close = -1;
-    for (let i = 0; i < s.length; i++) {
-      if (s[i] === "(") depth++;
-      else if (s[i] === ")") {
-        depth--;
-        if (depth === 0) {
-          close = i;
-          break;
-        }
-      }
-    }
-    if (close >= 0) {
-      const inside = nmcSplitFilters(s.slice(1, close));
-      let base = nmcEval(inside.expr, hass, vars);
-      if (inside.filters) base = nmcApplyFilters(base, inside.filters, hass, vars);
-      const rest = s.slice(close + 1);
-      if (rest === "") return base;
-      if (/^((?:\.[a-zA-Z_0-9]\w*)+)$/.test(rest)) {
-        for (const seg of rest.split(".").filter(Boolean)) {
-          if (base == null) return "";
-          base = base[seg];
-        }
-        return base == null ? "" : base;
-      }
-    }
-  }
-  return s;
-}
-
-function nmcTruthy(v) {
-  if (v instanceof NmcSafe) v = v.s;
-  if (v === false) return false;
-  if (v === "" || v === 0 || v === "0" || v == null) return false;
-  if (v === "off" || v === "false" || v === "unavailable" || v === "unknown" || v === "None")
-    return false;
-  if (Array.isArray(v)) return v.length > 0;
-  return true;
-}
-
-function nmcSplitTernary(s) {
-  let depth = 0,
-    inStr = "",
-    ifIdx = -1,
-    elseIdx = -1;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (c === inStr) inStr = "";
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      inStr = c;
-      continue;
-    }
-    if (c === "(" || c === "[" || c === "{") depth++;
-    else if (c === ")" || c === "]" || c === "}") depth--;
-    else if (depth === 0) {
-      if (ifIdx < 0 && s.substr(i, 4) === " if ") ifIdx = i;
-      else if (ifIdx >= 0 && s.substr(i, 6) === " else ") {
-        elseIdx = i;
-        break;
-      }
-    }
-  }
-  if (ifIdx >= 0 && elseIdx > ifIdx)
-    return {
-      t: s.slice(0, ifIdx).trim(),
-      cond: s.slice(ifIdx + 4, elseIdx).trim(),
-      f: s.slice(elseIdx + 6).trim(),
-    };
-  return null;
-}
-
-function nmcSplitLogic(s, op) {
-  const tok = " " + op + " ";
-  let depth = 0,
-    inStr = "",
-    idx = -1;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (c === inStr) inStr = "";
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      inStr = c;
-      continue;
-    }
-    if (c === "(" || c === "[" || c === "{") depth++;
-    else if (c === ")" || c === "]" || c === "}") depth--;
-    else if (depth === 0 && s.substr(i, tok.length) === tok) idx = i;
-  }
-  if (idx >= 0) return { a: s.slice(0, idx).trim(), b: s.slice(idx + tok.length).trim() };
-  return null;
-}
-
-// test Jinja "X is [not] TEST" (none/defined/number/string) au niveau 0
-function nmcSplitIs(s) {
-  let depth = 0,
-    inStr = "";
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (c === inStr) inStr = "";
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      inStr = c;
-      continue;
-    }
-    if (c === "(" || c === "[" || c === "{") depth++;
-    else if (c === ")" || c === "]" || c === "}") depth--;
-    else if (depth === 0 && s.substr(i, 4) === " is ") {
-      let rest = s.slice(i + 4).trim(),
-        neg = false;
-      if (/^not\s+/.test(rest)) {
-        neg = true;
-        rest = rest.replace(/^not\s+/, "");
-      }
-      const test = rest.split(/\s+/, 1)[0].toLowerCase();
-      return { val: s.slice(0, i).trim(), neg, test };
-    }
-  }
-  return null;
-}
-
-function nmcSplitIn(s) {
-  let depth = 0,
-    inStr = "";
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (c === inStr) inStr = "";
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      inStr = c;
-      continue;
-    }
-    if (c === "(" || c === "[" || c === "{") depth++;
-    else if (c === ")" || c === "]" || c === "}") depth--;
-    else if (depth === 0) {
-      if (s.substr(i, 8) === " not in ")
-        return { val: s.slice(0, i).trim(), list: s.slice(i + 8).trim(), neg: true };
-      if (s.substr(i, 4) === " in ")
-        return { val: s.slice(0, i).trim(), list: s.slice(i + 4).trim(), neg: false };
-    }
-  }
-  return null;
-}
-
-function nmcSplitCompare(s) {
-  let depth = 0,
-    inStr = "";
-  const ops = ["==", "!=", ">=", "<=", ">", "<"];
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (c === inStr) inStr = "";
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      inStr = c;
-      continue;
-    }
-    if (c === "(" || c === "[" || c === "{") depth++;
-    else if (c === ")" || c === "]" || c === "}") depth--;
-    else if (depth === 0) {
-      for (const op of ops)
-        if (s.substr(i, op.length) === op)
-          return { a: s.slice(0, i), op, b: s.slice(i + op.length) };
-    }
-  }
-  return null;
-}
-
-function nmcEvalArith(expr, hass, vars) {
-  const toks = nmcTokenize(expr, hass, vars);
-  if (!toks) return undefined;
-  const out = [],
-    ops = [],
-    prec = { "+": 1, "-": 1, "*": 2, "/": 2, "%": 2, "**": 3 },
-    rightAssoc = { "**": true };
-  for (const t of toks) {
-    if (typeof t === "number") out.push(t);
-    else if (t === "(") ops.push(t);
-    else if (t === ")") {
-      while (ops.length && ops[ops.length - 1] !== "(") out.push(ops.pop());
-      ops.pop();
-    } else {
-      while (
-        ops.length &&
-        (rightAssoc[t] ? prec[ops[ops.length - 1]] > prec[t] : prec[ops[ops.length - 1]] >= prec[t])
-      )
-        out.push(ops.pop());
-      ops.push(t);
-    }
-  }
-  while (ops.length) out.push(ops.pop());
-  const st = [];
-  for (const t of out) {
-    if (typeof t === "number") st.push(t);
-    else {
-      const b = st.pop(),
-        a = st.pop();
-      let r;
-      if (t === "+") r = a + b;
-      else if (t === "-") r = a - b;
-      else if (t === "*") r = a * b;
-      else if (t === "**") r = Math.pow(a, b);
-      else if (t === "%") r = b === 0 ? 0 : a % b;
-      else r = b === 0 ? 0 : a / b;
-      st.push(isFinite(r) ? r : 0);
-    }
-  }
-  return st.length === 1 ? st[0] : undefined;
-}
-
-// Fonctions mathematiques exposees aux expressions du body nmc (moteur maison).
-// 1 arg sauf pow/atan2/hypot (2) et min/max (n). Garde-fous : domaine invalide -> 0.
-const nmcMathFns = {
-  log:   (a) => (a[1] ? Math.log(a[0]) / Math.log(a[1]) : (a[0] > 0 ? Math.log(a[0]) : 0)), // log(x) = ln ; log(x,b) = base b
-  ln:    (a) => (a[0] > 0 ? Math.log(a[0]) : 0),
-  log10: (a) => (a[0] > 0 ? Math.log10(a[0]) : 0),
-  log2:  (a) => (a[0] > 0 ? Math.log2(a[0]) : 0),
-  exp:   (a) => Math.exp(a[0]),
-  sqrt:  (a) => Math.sqrt(Math.max(0, a[0])),
-  abs:   (a) => Math.abs(a[0]),
-  floor: (a) => Math.floor(a[0]),
-  ceil:  (a) => Math.ceil(a[0]),
-  round: (a) => (a[1] != null ? Math.round(a[0] * Math.pow(10, a[1])) / Math.pow(10, a[1]) : Math.round(a[0])),
-  sin:   (a) => Math.sin(a[0]),
-  cos:   (a) => Math.cos(a[0]),
-  tan:   (a) => Math.tan(a[0]),
-  pow:   (a) => Math.pow(a[0], a[1] == null ? 2 : a[1]),
-  atan2: (a) => Math.atan2(a[0], a[1]),
-  hypot: (a) => Math.hypot(a[0], a[1]),
-  min:   (a) => (a.length ? Math.min.apply(null, a) : 0),
-  max:   (a) => (a.length ? Math.max.apply(null, a) : 0),
-};
-
-function nmcTokenize(expr, hass, vars) {
-  const toks = [];
-  const re =
-    /\s*(states\([^)]*\)|is_state\([^)]*\)|state_attr\([^)]*\)|as_timestamp\((?:[^()]|\([^()]*\))*\)|(?:log10|log2|log|ln|exp|sqrt|abs|floor|ceil|round|sin|cos|tan|pow|atan2|hypot|min|max)\((?:[^()]|\([^()]*\))*\)|[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*|-?\d+\.?\d*|\*\*|[()+\-*/%])/g;
-  let m,
-    last = 0;
-  while ((m = re.exec(expr)) !== null) {
-    if (m.index !== last && expr.slice(last, m.index).trim() !== "") return null;
-    last = re.lastIndex;
-    const tk = m[1];
-    if (tk === "(" || tk === ")" || tk === "+" || tk === "*" || tk === "/" || tk === "**" || tk === "%") toks.push(tk);
-    else if (tk === "-") {
-      const prev = toks[toks.length - 1];
-      if (
-        toks.length === 0 ||
-        prev === "(" ||
-        prev === "+" ||
-        prev === "-" ||
-        prev === "*" ||
-        prev === "/" ||
-        prev === "**" ||
-        prev === "%"
-      )
-        toks.push(0, "-");
-      else toks.push("-");
-    } else if (/^[a-zA-Z_]\w*\(/.test(tk) && (nmcMathFns[tk.slice(0, tk.indexOf("("))] || tk.startsWith("as_timestamp("))) {
-      const fn = tk.slice(0, tk.indexOf("("));
-      const inner = tk.slice(tk.indexOf("(") + 1, tk.lastIndexOf(")"));
-      if (fn === "as_timestamp") {
-        const value = nmcAtom(tk, hass, vars);
-        toks.push(Number.isFinite(Number(value)) ? Number(value) : 0);
-        continue;
-      }
-      const args = inner.trim() === "" ? [] : nmcSplitTop(inner, ",").map((a) => {
-        // un argument peut lui-meme etre un appel (sqrt(pow(3,2))) : l'arithmetique
-        // sait les evaluer, nmcEvalF non -> on tente l'arithmetique d'abord.
-        const viaArith = nmcEvalArith(a, hass, vars);
-        if (typeof viaArith === "number" && isFinite(viaArith)) return viaArith;
-        const x = parseFloat(nmcEvalF(a, hass, vars));
-        return isNaN(x) ? 0 : x;
-      });
-      let r = nmcMathFns[fn](args);
-      toks.push(isFinite(r) ? r : 0);
-    } else {
-      const v = parseFloat(nmcAtom(tk, hass, vars));
-      toks.push(isNaN(v) ? 0 : v);
-    }
-  }
-  if (last < expr.length && expr.slice(last).trim() !== "") return null;
-  return toks;
-}
-
-// ── filtres ──
-function nmcParseFilterChain(filterStr) {
-  const chain = [];
-  for (let seg of nmcSplitTop(filterStr.replace(/^\s*\|/, ""), "|")) {
-    seg = seg.trim();
-    if (!seg) continue;
-    const p = seg.indexOf("(");
-    if (p < 0) {
-      chain.push({ name: seg, args: [] });
-      continue;
-    }
-    const name = seg.slice(0, p).trim();
-    const argStr = seg.slice(p + 1, seg.lastIndexOf(")"));
-    const args = argStr.trim() === "" ? [] : nmcSplitTop(argStr, ",").map((a) => a.trim());
-    chain.push({ name, args });
-  }
-  return chain;
-}
-function nmcArgVal(a) {
-  a = a.trim();
-  const kw = a.match(/^(\w+)\s*=\s*([\s\S]+)$/);
-  if (kw) return { key: kw[1], val: nmcArgVal(kw[2]).val };
-  if (/^(true|false)$/i.test(a)) return { val: a.toLowerCase() === "true" };
-  if (/^(none|null)$/i.test(a)) return { val: null };
-  if (/^-?\d+(\.\d+)?$/.test(a)) return { val: parseFloat(a) };
-  if (/^['"][\s\S]*['"]$/.test(a)) return { val: a.slice(1, -1) };
-  return { val: a };
-}
-function nmcGetAttr(obj, attr) {
-  if (obj == null) return undefined;
-  if (String(attr).indexOf(".") >= 0) {
-    let cur = obj;
-    for (const seg of String(attr).split(".")) {
-      if (cur == null) return undefined;
-      cur = cur[seg];
-    }
-    return cur;
-  }
-  return obj[attr];
-}
+// API de test : applique une chaîne de filtres ("|round(1)|upper") à une valeur.
 function nmcApplyFilters(val, filterStr, hass, vars) {
   if (!filterStr || !filterStr.trim()) return val;
-  let r = val;
-  for (const f of nmcParseFilterChain(filterStr)) {
-    const a = f.args.map((x) => {
-      const r0 = nmcArgVal(x);
-      // identifiant nu non-quoté (ex: format(bias)) → résolu dans les vars du template
-      const raw = String(x).trim();
-      if (
-        vars &&
-        r0.key === undefined &&
-        /^[a-zA-Z_]\w*(\.\w+)*$/.test(raw) &&
-        !/^(true|false|none|null)$/i.test(raw) &&
-        raw.split(".")[0] in vars
-      ) {
-        const resolved = nmcGetAttr(vars, raw);
-        if (resolved !== undefined) return { val: resolved };
-      }
-      return r0;
-    });
-    const a0 = a[0] ? a[0].val : undefined;
-    const kw = {};
-    for (const x of a) if (x.key) kw[x.key] = x.val;
-    switch (f.name) {
-      case "round": {
-        const n = parseInt(a0) || 0;
-        const num = parseFloat(r);
-        r = isNaN(num) ? r : num.toFixed(n);
-        break;
-      }
-      case "float":
-        r = parseFloat(r);
-        if (isNaN(r)) r = a0 !== undefined ? a0 : 0;
-        break;
-      case "int":
-        r = parseInt(r);
-        if (isNaN(r)) r = a0 !== undefined ? a0 : 0;
-        break;
-      case "abs":
-        r = Math.abs(parseFloat(r)) || 0;
-        break;
-      case "clamp": {
-        const lo = a0 !== undefined ? parseFloat(a0) : NaN;
-        const hi = a[1] ? parseFloat(a[1].val) : NaN;
-        let n = parseFloat(r);
-        if (isNaN(n)) n = 0;
-        if (!isNaN(lo) && n < lo) n = lo;
-        if (!isNaN(hi) && n > hi) n = hi;
-        r = n;
-        break;
-      }
-      case "format": {
-        // '%+.1f'|format(v) — mini-printf : %s %d %i %x %X %f, flags +/-/0, largeur, .préc
-        let ai = 0;
-        r = String(r).replace(/%([+\-0 ]*)(\d+)?(?:\.(\d+))?([sdifxX%])/g, (m, fl, w, prec, conv) => {
-          if (conv === "%") return "%";
-          const arg = a[ai] !== undefined ? a[ai].val : undefined;
-          ai++;
-          if (arg === undefined) return m;
-          let out2;
-          if (conv === "s") out2 = nmcToStr(arg);
-          else {
-            let num = parseFloat(arg);
-            if (isNaN(num)) num = 0;
-            if (conv === "d" || conv === "i") out2 = String(Math.trunc(num));
-            else if (conv === "x") out2 = Math.trunc(num).toString(16);
-            else if (conv === "X") out2 = Math.trunc(num).toString(16).toUpperCase();
-            else out2 = num.toFixed(prec !== undefined ? parseInt(prec) : 6);
-            if (fl.includes("+") && num >= 0) out2 = "+" + out2;
-          }
-          const width = w ? parseInt(w) : 0;
-          if (out2.length < width)
-            out2 = fl.includes("-")
-              ? out2.padEnd(width, " ")
-              : out2.padStart(width, fl.includes("0") ? "0" : " ");
-          return out2;
-        });
-        break;
-      }
-      case "zfill": {
-        const width = parseInt(a0) || 0;
-        const str = String(r);
-        r = str.startsWith("-")
-          ? "-" + str.slice(1).padStart(Math.max(0, width - 1), "0")
-          : str.padStart(width, "0");
-        break;
-      }
-      case "upper":
-        r = String(r).toUpperCase();
-        break;
-      case "lower":
-        r = String(r).toLowerCase();
-        break;
-      case "title":
-        r = String(r).replace(/\b\w/g, (c) => c.toUpperCase());
-        break;
-      case "capitalize":
-        r = String(r).charAt(0).toUpperCase() + String(r).slice(1).toLowerCase();
-        break;
-      case "trim":
-        r = String(r).trim();
-        break;
-      case "string":
-        r = nmcToStr(r);
-        break;
-      case "replace":
-        r = String(r)
-          .split(a0 != null ? String(a0) : "")
-          .join(a[1] != null ? String(a[1].val) : "");
-        break;
-      case "truncate": {
-        const n = parseInt(a0) || 80;
-        const s = String(r);
-        r = s.length > n ? s.slice(0, n) + (a[1] ? String(a[1].val) : "…") : s;
-        break;
-      }
-      case "indent": {
-        // Jinja : indent(width=4, first=false, blank=false) ; width peut etre une chaine.
-        const w = kw.width !== undefined ? kw.width : a0 !== undefined ? a0 : 4;
-        const first = kw.first !== undefined ? kw.first : a[1] && !a[1].key ? a[1].val : false;
-        const blank = kw.blank !== undefined ? kw.blank : a[2] && !a[2].key ? a[2].val : false;
-        const pad = typeof w === "string" ? w : " ".repeat(Math.max(0, Math.min(200, parseInt(w) || 0)));
-        r = String(r == null ? "" : r)
-          .split("\n")
-          .map((line, i) => ((i > 0 || first === true) && (blank === true || line.trim() !== "") ? pad + line : line))
-          .join("\n");
-        break;
-      }
-      case "slice": {
-        // Jinja : slice(n, fill_with) decoupe une liste en n colonnes (algo de jinja2.filters.do_slice).
-        const seq = Array.isArray(r) ? r : typeof r === "string" ? Array.from(r) : [];
-        const n = Math.max(1, Math.min(NMC_MAX_TEMPLATE_ITERATIONS, parseInt(a0) || 1));
-        const fill = kw.fill_with !== undefined ? kw.fill_with : a[1] && !a[1].key ? a[1].val : undefined;
-        const per = Math.floor(seq.length / n),
-          extra = seq.length % n;
-        const outCols = [];
-        let offset = 0;
-        for (let k = 0; k < n; k++) {
-          const start = offset + k * per;
-          if (k < extra) offset++;
-          const col = seq.slice(start, offset + (k + 1) * per);
-          if (fill !== undefined && fill !== null && k >= extra) col.push(fill);
-          outCols.push(col);
-        }
-        r = outCols;
-        break;
-      }
-      case "default":
-        if (r === "" || r == null || r === "None" || r === "unknown" || r === "unavailable")
-          r = a0 !== undefined ? a0 : "";
-        break;
-      case "length":
-        r = Array.isArray(r) ? r.length : r == null ? 0 : String(r).length;
-        break;
-      case "thousands": {
-        const sep = a0 !== undefined ? String(a0) : " ";
-        const parts = String(r).split(".");
-        parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, sep);
-        r = parts.join(".");
-        break;
-      }
-      case "first":
-        r = Array.isArray(r) ? r[0] : String(r).charAt(0);
-        break;
-      case "last":
-        r = Array.isArray(r) ? r[r.length - 1] : String(r).slice(-1);
-        break;
-      case "join":
-        r = Array.isArray(r) ? r.map(nmcToStr).join(a0 != null ? String(a0) : "") : String(r);
-        break;
-      case "reverse":
-        r = Array.isArray(r) ? r.slice().reverse() : String(r).split("").reverse().join("");
-        break;
-      case "sum": {
-        if (Array.isArray(r)) {
-          const at = kw.attribute;
-          r = r.reduce((s, x) => s + (parseFloat(at ? nmcGetAttr(x, at) : x) || 0), 0);
-        } else r = parseFloat(r) || 0;
-        break;
-      }
-      case "min":
-      case "max": {
-        if (Array.isArray(r) && r.length) {
-          const at = kw.attribute;
-          const key = (x) => parseFloat(at ? nmcGetAttr(x, at) : x);
-          r = r.reduce(
-            (best, x) => ((f.name === "min" ? key(x) < key(best) : key(x) > key(best)) ? x : best),
-            r[0]
-          );
-        }
-        break;
-      }
-      case "sort": {
-        if (Array.isArray(r)) {
-          const at = kw.attribute;
-          const rev = nmcTruthy(kw.reverse);
-          r = r.slice().sort((x, y) => {
-            let vx = at ? nmcGetAttr(x, at) : x,
-              vy = at ? nmcGetAttr(y, at) : y;
-            const nx = parseFloat(vx),
-              ny = parseFloat(vy);
-            let c = !isNaN(nx) && !isNaN(ny) ? nx - ny : String(vx).localeCompare(String(vy));
-            return rev ? -c : c;
-          });
-        }
-        break;
-      }
-      case "map": {
-        if (Array.isArray(r) && kw.attribute) r = r.map((x) => nmcGetAttr(x, kw.attribute));
-        break;
-      }
-      case "selectattr": {
-        if (Array.isArray(r) && a0 != null) {
-          const at = String(a0),
-            op = a[1] ? String(a[1].val) : null,
-            cmp = a[2] ? a[2].val : null;
-          r = r.filter((x) => {
-            const v = nmcGetAttr(x, at);
-            if (op == null) return nmcTruthy(v);
-            const nv = parseFloat(v),
-              nc = parseFloat(cmp);
-            switch (op) {
-              case "equalto":
-              case "eq":
-                return !isNaN(nv) && !isNaN(nc) ? nv === nc : String(v) === String(cmp);
-              case "ne":
-                return !isNaN(nv) && !isNaN(nc) ? nv !== nc : String(v) !== String(cmp);
-              case "gt":
-                return nv > nc;
-              case "ge":
-                return nv >= nc;
-              case "lt":
-                return nv < nc;
-              case "le":
-                return nv <= nc;
-              default:
-                return nmcTruthy(v);
-            }
-          });
-        }
-        break;
-      }
-      case "list":
-        r = Array.isArray(r) ? r : r == null || r === "" ? [] : [r];
-        break;
-      case "safe":
-        r = r instanceof NmcSafe ? r : new NmcSafe(nmcToStr(r));
-        break;
-    }
-  }
-  return r;
+  const src = "__nmc_v" + (filterStr.trim().startsWith("|") ? "" : "|") + filterStr.trim();
+  const ast = _nmcCached("\u0000f" + src, () => nmcParseExpr(src));
+  const V = Object.create(vars || {});
+  V.__nmc_v = val;
+  return nmcEv(ast, V, nmcNewCtx(hass || {}, null).E);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -2368,13 +2892,19 @@ function nmcCollectDependencies(config) {
     const aliasRe = /\{%\s*set\s+([a-zA-Z_]\w*)\s*=\s*['"]([^'"]+)['"]\s*%\}/g;
     let aliasMatch;
     while ((aliasMatch = aliasRe.exec(text)) !== null) aliases[aliasMatch[1]] = aliasMatch[2];
-    const calls = text.match(/\b(?:states|is_state|state_attr)\s*\(/g) || [];
-    const entityRe = /\b(?:states|is_state|state_attr)\(\s*([^,)\s]+)/g;
+    const calls = text.match(/\b(?:states|is_state|state_attr|is_state_attr|has_value)\s*\(/g) || [];
+    const entityRe = /\b(?:states|is_state|state_attr|is_state_attr|has_value)\(\s*([^,)\s]+)/g;
     let m;
     while ((m = entityRe.exec(text)) !== null) {
       const unquoted = m[1].replace(/^['"]|['"]$/g, "");
       ids.add(aliases[unquoted] || unquoted);
     }
+    // states.domaine.objet : forme attribut, lue elle aussi par le moteur
+    const attrRe = /\bstates\.([a-z_][a-z0-9_]*)\.([a-z0-9_]+)/g;
+    while ((m = attrRe.exec(text)) !== null) ids.add(m[1] + "." + m[2]);
+    // états énumérés (states.sensor, states[...], expand, « in states ») : liste inconnue d'avance
+    if (/\bstates\s*\[|\bexpand\s*\(|\bin\s+states\b|\bstates\s*\|/.test(text) ||
+        /\bstates\.[a-z_][a-z0-9_]*(?![a-z0-9_.])/.test(text)) dynamic = true;
     const unresolved = [...ids].some((entity) => !/^[-a-zA-Z0-9_]+\.[-a-zA-Z0-9_]+$/.test(entity));
     if (calls.length && unresolved) dynamic = true;
   };
@@ -2469,7 +2999,32 @@ const _EN = {
  "caractères": "characters",
  "erreur(s)": "error(s)",
  "itérations limitées à": "iterations limited to",
- "nom reserve, definition ignoree": "reserved name, definition ignored",
+ "appel invalide": "invalid call",
+ "après": "after",
+ "attendu": "expected",
+ "balise inattendue": "unexpected tag",
+ "balise inconnue": "unknown tag",
+ "balise non supportée": "unsupported tag",
+ "caractère inattendu": "unexpected character",
+ "chaîne non fermée": "unclosed string",
+ "expression invalide": "invalid expression",
+ "expression trop imbriquée": "expression nested too deeply",
+ "filtre inconnu": "unknown filter",
+ "fin de l'expression": "end of expression",
+ "fonction inconnue": "unknown function",
+ "heure invalide": "invalid time",
+ "inattendu": "unexpected",
+ "introuvable": "not found",
+ "liste trop longue": "list too long",
+ "manquant": "missing",
+ "méthode inconnue": "unknown method",
+ "nom attendu": "name expected",
+ "nom de test attendu": "test name expected",
+ "pas un namespace": "not a namespace",
+ "résultat trop long": "result too long",
+ "test inconnu": "unknown test",
+ "trouvé": "found",
+ "valeur invalide": "invalid value",
  "pas une liste": "not a list",
  "argument inconnu": "unknown argument",
  "macro inconnue": "unknown macro",
@@ -2480,6 +3035,8 @@ const _EN = {
  "Épaisseur": "Thickness",
  "— thème HA —": "— HA theme —"
 };
+// Deux-points : espace insécable avant en français, aucune en anglais.
+const _sep = () => (_lang === "fr" ? " : " : ": ");
 const _t = (fr) => {
   if (_lang === 'fr' || fr == null || fr === '') return fr;
   const k = String(fr).replace(/\s+/g, ' ').trim();
