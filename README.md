@@ -2,7 +2,7 @@
 
 <img src="https://raw.githubusercontent.com/cerealkiller57540/neon-markdown-card/main/images/logo.png" alt="Neon Markdown Card" width="480">
 
-**A Markdown card for Home Assistant that renders full HTML, SVG and CSS from Jinja templates in the browser, under a neon header.**
+**A Markdown card for Home Assistant that renders full HTML, SVG and CSS from Jinja templates in the browser, with an optional, fully customisable neon header.**
 
 [![HACS Custom][hacs-badge]][hacs-url]
 [![Release][release-badge]][release-url]
@@ -19,7 +19,7 @@
 
 </div>
 
-Every panel above is **one `neon-markdown-card`**: no other custom card, no template sensor written for it. The body is HTML (or Markdown) with Jinja-style templates, evaluated in the browser against the live states: `{% for %}` over an attribute list, `{% set %}`, macros, filters, SVG sparklines from the recorder history, `<style>` blocks with `@container` queries and keyframe animations. The header on top is a neon title with glow, gradient, flicker and CRT scanline.
+Every panel above is **one `neon-markdown-card`**: no other custom card, no template sensor written for it. The body is HTML (or Markdown) with Jinja-style templates, evaluated in the browser against the live states: `{% for %}` over an attribute list, `{% set %}`, macros, filters, SVG sparklines from the recorder history, `<style>` blocks with `@container` queries and keyframe animations. The header on top is optional: a neon title whose icon, colours, glow, gradient, flicker and CRT scanline are all yours to set, or no header at all.
 
 *These screenshots are examples of what the templates can do, taken from the author's dashboard (French labels, real data, Neo Tokyo theme). The card ships the engine and the header, not these layouts: you write the body.*
 
@@ -31,7 +31,7 @@ Every panel above is **one `neon-markdown-card`**: no other custom card, no temp
 - **History sparklines**: declare `history: [{entity, hours}]` and draw `hist['sensor.x'].pts` straight into an SVG `<polyline>`.
 - **`data-entity="sensor.x"`** on any element opens the native more-info dialog on tap.
 - **`data-toggle="light.x"`** toggles an entity on tap; **`data-step="input_number.x|-0.5"`** changes a `number` / `input_number` by the given delta (kept within its min and max). Only entity ids written literally in the body are obeyed: an id that comes from a state or an attribute is ignored.
-- **Neon header**, the same as [neon-header-card](https://github.com/cerealkiller57540/Home-Assistant-Neon-Cards): icon, glow, two-colour gradient, flicker, scanline, hover glitch. Use `mode: title`, `body` or `both`.
+- **Optional neon header**, the same as [neon-header-card](https://github.com/cerealkiller57540/Home-Assistant-Neon-Cards): icon, glow, two-colour gradient, flicker, scanline, hover glitch, font, each one configurable. Use `mode: both` (header and body), `title` (header only) or `body` (no header).
 - **25 ready-made keyframes** (`nmc-flicker`, `nmc-scan-scroll`, `nmc-ring-spin`, `nmc-data-flow`, `nmc-pulse-travel`, `nmc-dash-crawl`…) to use in inline `animation:`.
 - **Visual editor** for the header and frame; the body is edited as text.
 - `debug: true` prints template errors under the body. Guard rails cap output size, loop iterations and nesting depth, so a broken template cannot freeze the dashboard.
